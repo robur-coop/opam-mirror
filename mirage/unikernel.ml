@@ -8,7 +8,6 @@ end
 open Lwt.Infix
 
 module Make
-  (Console : Mirage_console.S)
   (Time : Mirage_time.S)
   (Pclock : Mirage_clock.PCLOCK)
   (Stack : Tcpip.Stack.V4V6)
@@ -61,9 +60,7 @@ module Make
       | _ -> Lwt.return_none in
     Mimic.(fold Client.ipaddr Fun.[ req dns; req Client.domain_name ] ~k ctx)
 
-  let log console fmt = Fmt.kstr (Console.log console) fmt
-
-  let start console _time _pclock stack dns _paf_cohttp =
+  let start _time _pclock stack dns _paf_cohttp =
     let uri = Uri.of_string (Key_gen.uri ()) in
     let ctx =
       Mimic.empty
@@ -74,6 +71,6 @@ module Make
       |> with_stack stack (* stack *)
       |> with_dns dns     (* dns *) in
     Client.get ~ctx uri >>= fun (_resp, body) ->
-    Cohttp_lwt.Body.to_string body >>= fun str ->
-    log console "%S\n%!" str
+    Cohttp_lwt.Body.to_string body >|= fun str ->
+    Logs.info (fun m -> m "%S\n%!" str)
 end
