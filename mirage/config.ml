@@ -32,7 +32,7 @@ let mirror =
       package ~min:"3.7.0" "git-paf" ;
       package "opam-file-format" ;
     ]
-    (time @-> pclock @-> stackv4v6 @-> dns_client @-> paf @-> git_client @-> job)
+    (kv_rw @-> time @-> pclock @-> stackv4v6 @-> dns_client @-> paf @-> git_client @-> job)
 
 let paf time stackv4v6 = paf_conf () $ time $ tcpv4v6_of_stackv4v6 stackv4v6
 
@@ -48,4 +48,4 @@ let git_client =
     (git_http ~authenticator:tls_authenticator tcp git)
 
 let () = register "mirror"
-    [ mirror $ default_time $ default_posix_clock $ stack $ dns $ paf default_time stack $ git_client ]
+    [ mirror $ kv_rw_mem () $ default_time $ default_posix_clock $ stack $ dns $ paf default_time stack $ git_client ]
