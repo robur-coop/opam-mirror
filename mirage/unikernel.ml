@@ -343,9 +343,11 @@ module Make
                            (hash_to_string h) (hex_to_string v) (hex_to_string v'));
               false
             end) hm
-      then
+      then begin
+        Logs.info (fun m -> m "KV.set (%d)" (String.length data));
         KV.set t.dev (Mirage_kv.Key.v sha256) data >|= function
         | Ok () ->
+          Logs.info (fun m -> m "KV.set done");
           t.md5s <- SM.add md5 sha256 t.md5s;
           t.sha512s <- SM.add sha512 sha256 t.sha512s;
           Logs.info (fun m -> m "wrote %s (%d bytes)" (hex_to_string sha256)
@@ -353,7 +355,7 @@ module Make
         | Error e ->
           Logs.err (fun m -> m "error %a while writing %s"
                        KV.pp_write_error e (hex_to_string sha256))
-      else
+      end else
         Lwt.return_unit
 
     let find_key t h v =
@@ -468,7 +470,7 @@ module Make
       Lwt_list.iter_p (fun (url, csums) ->
           HM.fold (fun h v r ->
               r >>= function
-              | true -> Disk.exists disk h v
+              | true -> Disk.exists disk h (hex_to_string v)
               | false -> Lwt.return false)
             csums (Lwt.return true) >>= function
           | true ->
@@ -476,7 +478,9 @@ module Make
             Lwt.return_unit
           | false ->
             follow 20 url >>= function
-            | Some str -> Disk.write disk str csums
+            | Some str ->
+              Logs.info (fun m -> m "writing (%d)" (String.length str));
+              Disk.write disk str csums
             | None -> Lwt.return_unit)
         (SM.bindings urls) >|= fun () ->
       Logs.info (fun m -> m "done")
