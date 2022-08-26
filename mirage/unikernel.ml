@@ -356,28 +356,51 @@ module Make
       else
         Lwt.return_unit
 
-    let read t h v =
+    let find_key t h v =
       match hex_of_string v with
       | Error `Msg msg ->
         Logs.err (fun m -> m "error %s while decoding hex %s" msg v);
-        Lwt.return (Error `Bad_request)
+        Error `Bad_request
       | Ok bin ->
         match
           match h with
           | `MD5 -> SM.find_opt bin t.md5s
           | `SHA512 -> SM.find_opt bin t.sha512s
           | `SHA256 -> Some bin
+          | _ -> None
         with
         | None ->
           Logs.err (fun m -> m "couldn't find %s" v);
-          Lwt.return (Error `Not_found)
-        | Some x ->
-          KV.get t.dev (Mirage_kv.Key.v x) >|= function
-          | Ok data -> Ok data
-          | Error e ->
-            Logs.err (fun m -> m "error %a while reading %s %s"
-                         KV.pp_error e (hash_to_string h) v);
-            Error `Not_found
+          Error `Not_found
+        | Some x -> Ok x
+
+    let exists t h v =
+      match find_key t h v with
+      | Error _ -> Lwt.return false
+      | Ok x ->
+        KV.exists t.dev (Mirage_kv.Key.v x) >|= function
+        | Ok Some `Value -> true
+        | Ok Some `Dictionary ->
+          Logs.err (fun m -> m "unexpected dictionary for %s %s"
+                       (hash_to_string h) (hex_to_string v));
+          false
+        | Ok None -> false
+        | Error e ->
+          Logs.err (fun m -> m "exists %s %s returned %a"
+                       (hash_to_string h) (hex_to_string v)
+                       KV.pp_error e);
+          false
+
+    let read t h v =
+      match find_key t h v with
+      | Error _ as e -> Lwt.return e
+      | Ok x ->
+        KV.get t.dev (Mirage_kv.Key.v x) >|= function
+        | Ok data -> Ok data
+        | Error e ->
+          Logs.err (fun m -> m "error %a while reading %s %s"
+                       KV.pp_error e (hash_to_string h) v);
+          Error `Not_found
   end
 
   let resolve_location ~uri ~location =
@@ -443,9 +466,18 @@ module Make
         end
       in
       Lwt_list.iter_p (fun (url, csums) ->
-          follow 20 url >>= function
-          | Some str -> Disk.write disk str csums
-          | None -> Lwt.return_unit)
+          HM.fold (fun h v r ->
+              r >>= function
+              | true -> Disk.exists disk h v
+              | false -> Lwt.return false)
+            csums (Lwt.return true) >>= function
+          | true ->
+            Logs.info (fun m -> m "ignoring %s (already present)" url);
+            Lwt.return_unit
+          | false ->
+            follow 20 url >>= function
+            | Some str -> Disk.write disk str csums
+            | None -> Lwt.return_unit)
         (SM.bindings urls) >|= fun () ->
       Logs.info (fun m -> m "done")
 end
