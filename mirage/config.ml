@@ -1,11 +1,7 @@
 open Mirage
 
-type paf = Paf
-let paf = typ Paf
-
-let paf_conf () =
-  let packages = [ package "paf" ~sublibs:[ "mirage" ] ] in
-  impl ~packages "Paf_mirage.Make" (time @-> tcpv4v6 @-> paf)
+type http_client = HTTP_client
+let http_client = typ HTTP_client
 
 let remote =
   let doc = Key.Arg.info
@@ -26,15 +22,14 @@ let mirror =
   foreign "Unikernel.Make"
     ~keys:[ Key.v remote ; Key.v tls_authenticator ]
     ~packages:[
-      package "paf" ~min:"0.0.9" ;
-      package "paf-cohttp" ~min:"0.0.7" ;
+      package "paf" ;
+      package "h2" ;
+      package "httpaf" ;
       package ~min:"3.0.0" "irmin-mirage-git" ;
       package ~min:"3.7.0" "git-paf" ;
       package "opam-file-format" ;
     ]
-    (kv_rw @-> time @-> pclock @-> stackv4v6 @-> dns_client @-> paf @-> git_client @-> job)
-
-let paf time stackv4v6 = paf_conf () $ time $ tcpv4v6_of_stackv4v6 stackv4v6
+    (kv_rw @-> time @-> pclock @-> stackv4v6 @-> git_client @-> http_client @-> job)
 
 let stack = generic_stackv4v6 default_network
 
@@ -42,10 +37,24 @@ let dns = generic_dns_client stack
 
 let tcp = tcpv4v6_of_stackv4v6 stack
 
-let git_client =
-  let git = git_happy_eyeballs stack dns (generic_happy_eyeballs stack dns) in
-  merge_git_clients (git_tcp tcp git)
-    (git_http ~authenticator:tls_authenticator tcp git)
+let http_client =
+  let connect _ modname = function
+    | [ _time; _pclock; _tcpv4v6; ctx ] ->
+      Fmt.str {ocaml|%s.connect %s|ocaml} modname ctx
+    | _ -> assert false in
+  impl ~connect "Http_mirage_client.Make"
+    (time @-> pclock @-> tcpv4v6 @-> git_client @-> http_client)
+(* XXX(dinosaure): [git_client] seems bad but it becames from a long discussion
+   when a "mimic" device seems not accepted by everyone. We can copy [git_happy_eyeballs]
+   and provide an [http_client] instead of a [git_client] but that mostly means that
+   2 instances of happy-eyeballs will exists together which is not really good
+   (it puts a pressure on the scheduler). *)
+
+let git_client, http_client =
+  let happy_eyeballs = git_happy_eyeballs stack dns (generic_happy_eyeballs stack dns) in
+  merge_git_clients (git_tcp tcp happy_eyeballs)
+    (git_http ~authenticator:tls_authenticator tcp happy_eyeballs),
+  http_client $ default_time $ default_posix_clock $ tcp $ happy_eyeballs
 
 let program_block_size =
   let doc = Key.Arg.info [ "program-block-size" ] in
@@ -56,4 +65,4 @@ let kv_rw =
   chamelon ~program_block_size block
 
 let () = register "mirror"
-    [ mirror $ kv_rw $ default_time $ default_posix_clock $ stack $ dns $ paf default_time stack $ git_client ]
+    [ mirror $ kv_rw $ default_time $ default_posix_clock $ stack $ git_client $ http_client ]

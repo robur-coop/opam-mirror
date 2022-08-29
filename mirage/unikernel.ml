@@ -14,59 +14,11 @@ module Make
   (Time : Mirage_time.S)
   (Pclock : Mirage_clock.PCLOCK)
   (Stack : Tcpip.Stack.V4V6)
-  (Dns : DNS) (* XXX(dinosaure): ask @hannesm to provide a signature. *)
-  (Paf : Paf_mirage.S with type stack = Stack.TCP.t and type ipaddr = Ipaddr.t)
-  (_ : sig end) = struct
+  (_ : sig end)
+  (HTTP : Http_mirage_client.S) = struct
 
   module Store = Irmin_mirage_git.Mem.KV.Make(Irmin.Contents.String)
   module Sync = Irmin.Sync.Make(Store)
-
-  module Client = Paf_cohttp
-  module Nss = Ca_certs_nss.Make(Pclock)
-
-  let authenticator = Result.get_ok (Nss.authenticator ())
-  let default_tls_cfg = Tls.Config.client ~authenticator ()
-
-  let stack = Mimic.make ~name:"stack"
-  let tls = Mimic.make ~name:"tls"
-
-  let with_stack v ctx = Mimic.add stack (Stack.tcp v) ctx
-
-  let with_tcp ctx =
-    let k scheme stack ipaddr port =
-      match scheme with
-      | `HTTP -> Lwt.return_some (stack, ipaddr, port)
-      | _ -> Lwt.return_none
-    in
-    Mimic.(fold Paf.tcp_edn Fun.[ req Client.scheme
-                                ; req stack
-                                ; req Client.ipaddr
-                                ; dft Client.port 80 ] ~k ctx)
-
-  let with_tls ctx =
-    let k scheme domain_name cfg stack ipaddr port =
-      match scheme with
-      | `HTTPS -> Lwt.return_some (domain_name, cfg, stack, ipaddr, port)
-      | _ -> Lwt.return_none
-    in
-    Mimic.(fold Paf.tls_edn Fun.[ req Client.scheme
-                                ; opt Client.domain_name
-                                ; dft tls default_tls_cfg
-                                ; req stack
-                                ; req Client.ipaddr
-                                ; dft Client.port 443 ] ~k ctx)
-
-  let dns = Mimic.make ~name:"dns"
-
-  let with_dns v ctx = Mimic.add dns v ctx
-  let with_sleep ctx = Mimic.add Paf_cohttp.sleep Time.sleep_ns ctx
-
-  let with_resolv ctx =
-    let k dns domain_name =
-      Dns.gethostbyname dns domain_name >>= function
-      | Ok ipv4 -> Lwt.return_some (Ipaddr.V4 ipv4)
-      | _ -> Lwt.return_none in
-    Mimic.(fold Client.ipaddr Fun.[ req dns; req Client.domain_name ] ~k ctx)
 
   module SM = Map.Make(String)
 
@@ -406,21 +358,10 @@ module Make
           Error `Not_found
   end
 
-  let resolve_location ~uri ~location =
-    match String.split_on_char '/' location with
-    | "http:" :: "" :: _ -> Ok location
-    | "https:" :: "" :: _ -> Ok location
-    | "" :: "" :: _ ->
-      let schema = String.sub uri 0 (String.index uri '/') in
-      Ok (schema ^ location)
-    | "" :: _ ->
-      (match String.split_on_char '/' uri with
-       | schema :: "" :: user_pass_host_port :: _ ->
-         Ok (String.concat "/" [schema ; "" ; user_pass_host_port ^ location])
-       | _ -> Error (`Msg ("expected an absolute uri, got: " ^ uri)))
-    | _ -> Error (`Msg ("unknown location (relative path): " ^ location))
+  let one_request = Http_mirage_client.one_request ~alpn_protocol:HTTP.alpn_protocol
+    ~authenticator:HTTP.authenticator
 
-  let start kv _time _pclock stack dns _paf_cohttp git_ctx =
+  let start kv _time _pclock stack git_ctx http_ctx =
     Git.connect git_ctx >>= fun (store, upstream) ->
     Git.pull store upstream >>= function
     | Error `Msg msg -> Lwt.fail_with msg
@@ -428,46 +369,6 @@ module Make
       Logs.info (fun m -> m "git: %s" msg);
       Git.find_urls store >>= fun urls ->
       Disk.init kv >>= fun disk ->
-      let ctx =
-        Mimic.empty
-        |> with_sleep
-        |> with_tcp         (* stack -> ipaddr -> port => (stack * ipaddr * port) *)
-        |> with_tls         (* domain_name -> tls -> stack -> ipaddr -> port => (domain_name * tls * stack * ipaddr * port) *)
-        |> with_resolv      (* domain_name => ipaddr *)
-        |> with_stack stack (* stack *)
-        |> with_dns dns     (* dns *) in
-      let rec follow count uri =
-        if count = 0 then begin
-          Logs.err (fun m -> m "redirection limit exceeded");
-          Lwt.return None
-        end else begin
-          Logs.info (fun m -> m "retrieving %s" uri);
-          Client.get ~ctx (Uri.of_string uri) >>= fun (resp, body) ->
-          match resp.Cohttp.Response.status with
-          | `OK ->
-            Cohttp_lwt.Body.to_string body >|= fun str ->
-            Some str
-          | #Cohttp.Code.redirection_status ->
-            begin match Cohttp.Header.get resp.Cohttp.Response.headers "location" with
-              | Some location ->
-                begin match resolve_location ~uri ~location with
-                  | Error `Msg msg ->
-                    Logs.err (fun m -> m "error %s resolving redirect location %s"
-                                 msg location);
-                    Lwt.return None
-                  | Ok new_uri -> follow (pred count) new_uri
-                end
-              | None ->
-                Logs.err (fun m -> m "redirect without location");
-                Lwt.return None
-            end
-          | s ->
-            Logs.err (fun m -> m "error %s while fetching %s"
-                         (Cohttp.Code.string_of_status resp.Cohttp.Response.status)
-                         uri);
-            Lwt.return None
-        end
-      in
       Lwt_list.iter_p (fun (url, csums) ->
           HM.fold (fun h v r ->
               r >>= function
@@ -478,11 +379,11 @@ module Make
             Logs.info (fun m -> m "ignoring %s (already present)" url);
             Lwt.return_unit
           | false ->
-            follow 20 url >>= function
-            | Some str ->
+            one_request ~ctx:http_ctx url >>= function
+            | Ok (resp, Some str) ->
               Logs.info (fun m -> m "writing (%d)" (String.length str));
               Disk.write disk str csums
-            | None -> Lwt.return_unit)
+            | _ -> Lwt.return_unit)
         (SM.bindings urls) >|= fun () ->
       Logs.info (fun m -> m "done")
 end
