@@ -299,7 +299,7 @@ module Make
               | Ok data ->
                 let cs = Cstruct.of_string data in
                 let digest = Mirage_crypto.Hash.digest `SHA256 cs in
-                if Cstruct.equal digest (Cstruct.of_string name) then
+                if Cstruct.equal digest (Cstruct.of_string name) then begin
                   let md5 = Mirage_crypto.Hash.digest `MD5 cs
                   and sha512 = Mirage_crypto.Hash.digest `SHA512 cs
                   in
@@ -307,8 +307,9 @@ module Make
                   and sha512s = SM.add (Cstruct.to_string sha512) name t.sha512s
                   in
                   t.md5s <- md5s ; t.sha512s <- sha512s;
+                  Logs.info (fun m -> m "added %s" (hex_to_string name));
                   Lwt.return_unit
-                else begin
+                end else begin
                   Logs.err (fun m -> m "corrupt data, expected %s, read %s"
                                (hex_to_string name)
                                (hex_to_string (Cstruct.to_string digest)));

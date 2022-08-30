@@ -49,7 +49,7 @@ let git_client =
 
 let program_block_size =
   let doc = Key.Arg.info [ "program-block-size" ] in
-  Key.(create "program_block_size" Arg.(opt int 512 doc))
+  Key.(create "program_block_size" Arg.(opt int 16 doc))
 
 let kv_rw =
   let block = block_of_file "db" in
