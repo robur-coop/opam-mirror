@@ -369,7 +369,9 @@ module Make
       Logs.info (fun m -> m "git: %s" msg);
       Git.find_urls store >>= fun urls ->
       Disk.init kv >>= fun disk ->
+      let pool = Lwt_pool.create 20 (Fun.const Lwt.return_unit) in
       Lwt_list.iter_p (fun (url, csums) ->
+          Lwt_pool.use pool @@ fun () ->
           HM.fold (fun h v r ->
               r >>= function
               | true -> Disk.exists disk h (hex_to_string v)
