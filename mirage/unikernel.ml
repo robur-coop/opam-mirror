@@ -297,13 +297,11 @@ module Make
               false
             end) hm
       then begin
-        Logs.info (fun m -> m "KV.set (%d)" (String.length data));
         KV.set t.dev (Mirage_kv.Key.v sha256) data >|= function
         | Ok () ->
-          Logs.info (fun m -> m "KV.set done");
           t.md5s <- SM.add md5 sha256 t.md5s;
           t.sha512s <- SM.add sha512 sha256 t.sha512s;
-          Logs.info (fun m -> m "wrote %s (%d bytes)" (hex_to_string sha256)
+          Logs.debug (fun m -> m "wrote %s (%d bytes)" (hex_to_string sha256)
                         (String.length data))
         | Error e ->
           Logs.err (fun m -> m "error %a while writing %s"
@@ -381,10 +379,9 @@ module Make
             Logs.info (fun m -> m "ignoring %s (already present)" url);
             Lwt.return_unit
           | false ->
+            Logs.info (fun m -> m "downloading %s" url);
             one_request ~ctx:http_ctx url >>= function
-            | Ok (resp, Some str) ->
-              Logs.info (fun m -> m "writing (%d)" (String.length str));
-              Disk.write disk str csums
+            | Ok (resp, Some str) -> Disk.write disk str csums
             | _ -> Lwt.return_unit)
         (SM.bindings urls) >|= fun () ->
       Logs.info (fun m -> m "done")
