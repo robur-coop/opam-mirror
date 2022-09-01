@@ -3,6 +3,14 @@ open Mirage
 type http_client = HTTP_client
 let http_client = typ HTTP_client
 
+let key_hex =
+  let doc =
+    Key.Arg.info
+      ~doc:"File system keys should be stored as human-readable (hex) characters"
+      ["key-hex"]
+  in
+  Key.(create "key-hex" Arg.(flag doc))
+
 let check =
   let doc =
     Key.Arg.info
@@ -29,7 +37,7 @@ let tls_authenticator =
 
 let mirror =
   foreign "Unikernel.Make"
-    ~keys:[ Key.v check ; Key.v remote ; Key.v tls_authenticator ]
+    ~keys:[ Key.v key_hex ; Key.v check ; Key.v remote ; Key.v tls_authenticator ]
     ~packages:[
       package "paf" ;
       package "h2" ;

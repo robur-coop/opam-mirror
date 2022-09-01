@@ -227,20 +227,37 @@ module Make
     type t = {
       mutable md5s : string SM.t ;
       mutable sha512s : string SM.t ;
+      key_hex : bool ;
       dev : KV.t ;
     }
 
-    let empty dev = { md5s = SM.empty ; sha512s = SM.empty ; dev }
+    let empty key_hex dev = { md5s = SM.empty ; sha512s = SM.empty ; key_hex ; dev }
+
+    let key t d =
+      let d = Cstruct.to_string d in
+      if t.key_hex then hex_to_string d else d
+
+    let key_to_string t d = if t.key_hex then d else hex_to_string d
+
+    let key_of_string t v =
+      if t.key_hex then
+        Ok v
+      else
+        match hex_of_string v with
+        | Error `Msg msg ->
+          Logs.err (fun m -> m "error %s while decoding hex %s" msg v);
+          Error `Bad_request
+        | Ok bin -> Ok bin
 
     (* on disk, we use a flat file system where the filename is the sha256 of the data *)
     (* on startup, we read + validate all data, and also store in the overlays (md5/sha512) the pointers *)
     (* the read can be md5/sha256/sha512 sum, and will output the data requested *)
     (* a write will compute the hashes and save the data (also validating potential other hashes) *)
-    let init dev =
+    let init ?(key_hex = false) dev =
       KV.list dev Mirage_kv.Key.empty >>= function
       | Error e -> Logs.err (fun m -> m "error %a listing kv" KV.pp_error e); assert false
       | Ok entries ->
-        let t = empty dev in
+        let t = empty key_hex dev in
         Lwt_list.iter_s (fun (name, typ) ->
             match typ with
             | `Dictionary ->
@@ -251,49 +268,52 @@ module Make
               | Ok data ->
                 let cs = Cstruct.of_string data in
                 let digest = Mirage_crypto.Hash.digest `SHA256 cs in
-                if Cstruct.equal digest (Cstruct.of_string name) then begin
-                  let md5 = Mirage_crypto.Hash.digest `MD5 cs
-                  and sha512 = Mirage_crypto.Hash.digest `SHA512 cs
+                if String.equal name (key t digest) then begin
+                  let md5 = Mirage_crypto.Hash.digest `MD5 cs |> key t
+                  and sha512 = Mirage_crypto.Hash.digest `SHA512 cs |> key t
                   in
-                  let md5s = SM.add (Cstruct.to_string md5) name t.md5s
-                  and sha512s = SM.add (Cstruct.to_string sha512) name t.sha512s
+                  let md5s = SM.add md5 name t.md5s
+                  and sha512s = SM.add sha512 name t.sha512s
                   in
                   t.md5s <- md5s ; t.sha512s <- sha512s;
-                  Logs.info (fun m -> m "added %s" (hex_to_string name));
+                  Logs.info (fun m -> m "added %s (md5 %s sha512 %s)"
+                                (key_to_string t name) (key_to_string t md5)
+                                (key_to_string t sha512));
                   Lwt.return_unit
                 end else begin
                   Logs.err (fun m -> m "corrupt data, expected %s, read %s"
-                               (hex_to_string name)
+                               (key_to_string t name)
                                (hex_to_string (Cstruct.to_string digest)));
                   KV.remove dev (Mirage_kv.Key.v name) >|= function
                   | Ok () -> ()
                   | Error e ->
                     Logs.err (fun m -> m "error %a while removing %s"
-                                 KV.pp_write_error e (hex_to_string name))
+                                 KV.pp_write_error e (key_to_string t name))
                 end
               | Error e ->
                 Logs.err (fun m -> m "error %a reading %s"
-                             KV.pp_error e (hex_to_string name));
+                             KV.pp_error e (key_to_string t name));
                 Lwt.return_unit)
           entries >|= fun () ->
         t
 
     let write t data hm =
       let cs = Cstruct.of_string data in
-      let sha256 = Mirage_crypto.Hash.digest `SHA256 cs |> Cstruct.to_string
-      and md5 = Mirage_crypto.Hash.digest `MD5 cs |> Cstruct.to_string
-      and sha512 = Mirage_crypto.Hash.digest `SHA512 cs |> Cstruct.to_string
+      let sha256 = Mirage_crypto.Hash.digest `SHA256 cs |> key t
+      and md5 = Mirage_crypto.Hash.digest `MD5 cs |> key t
+      and sha512 = Mirage_crypto.Hash.digest `SHA512 cs |> key t
       in
       if
         HM.for_all (fun h v ->
             let v' =
               match h with `MD5 -> md5 | `SHA256 -> sha256 | `SHA512 -> sha512 | _ -> assert false
             in
+            let v = if t.key_hex then hex_to_string v else v in
             if String.equal v v' then
               true
             else begin
               Logs.err (fun m -> m "hash mismatch %s: expected %s, got %s"
-                           (hash_to_string h) (hex_to_string v) (hex_to_string v'));
+                           (hash_to_string h) (key_to_string t v) (key_to_string t v'));
               false
             end) hm
       then begin
@@ -301,31 +321,28 @@ module Make
         | Ok () ->
           t.md5s <- SM.add md5 sha256 t.md5s;
           t.sha512s <- SM.add sha512 sha256 t.sha512s;
-          Logs.debug (fun m -> m "wrote %s (%d bytes)" (hex_to_string sha256)
+          Logs.debug (fun m -> m "wrote %s (%d bytes)" (key_to_string t sha256)
                         (String.length data))
         | Error e ->
           Logs.err (fun m -> m "error %a while writing %s"
-                       KV.pp_write_error e (hex_to_string sha256))
+                       KV.pp_write_error e (key_to_string t sha256))
       end else
         Lwt.return_unit
 
     let find_key t h v =
-      match hex_of_string v with
-      | Error `Msg msg ->
-        Logs.err (fun m -> m "error %s while decoding hex %s" msg v);
-        Error `Bad_request
-      | Ok bin ->
-        match
-          match h with
-          | `MD5 -> SM.find_opt bin t.md5s
-          | `SHA512 -> SM.find_opt bin t.sha512s
-          | `SHA256 -> Some bin
-          | _ -> None
-        with
-        | None ->
-          Logs.err (fun m -> m "couldn't find %s" v);
-          Error `Not_found
-        | Some x -> Ok x
+      let ( let* ) = Result.bind in
+      let* key = key_of_string t v in
+      match
+        match h with
+        | `MD5 -> SM.find_opt key t.md5s
+        | `SHA512 -> SM.find_opt key t.sha512s
+        | `SHA256 -> Some key
+        | _ -> None
+      with
+      | None ->
+        Logs.err (fun m -> m "couldn't find %s" v);
+        Error `Not_found
+      | Some x -> Ok x
 
     let exists t h v =
       match find_key t h v with
@@ -335,12 +352,12 @@ module Make
         | Ok Some `Value -> true
         | Ok Some `Dictionary ->
           Logs.err (fun m -> m "unexpected dictionary for %s %s"
-                       (hash_to_string h) (hex_to_string v));
+                       (hash_to_string h) (key_to_string t v));
           false
         | Ok None -> false
         | Error e ->
           Logs.err (fun m -> m "exists %s %s returned %a"
-                       (hash_to_string h) (hex_to_string v)
+                       (hash_to_string h) (key_to_string t v)
                        KV.pp_error e);
           false
 
@@ -360,7 +377,8 @@ module Make
     ~authenticator:HTTP.authenticator
 
   let start kv _time _pclock _stack git_ctx http_ctx =
-    Disk.init kv >>= fun disk ->
+    let key_hex = Key_gen.key_hex () in
+    Disk.init ~key_hex kv >>= fun disk ->
     if Key_gen.check () then begin
       Logs.info (fun m -> m "done");
       Lwt.return_unit
