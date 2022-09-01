@@ -141,8 +141,8 @@ module Make
           in
           let url =
             match url, archive with
-            | Some { pelem = Variable (_, { pelem = String url ; _ }) }, None -> Some url
-            | None, Some { pelem = Variable (_, { pelem = String url ; _ }) } -> Some url
+            | Some { pelem = Variable (_, { pelem = String url ; _ }) ; _ }, None -> Some url
+            | None, Some { pelem = Variable (_, { pelem = String url ; _ }); _ } -> Some url
             | _ ->
               Logs.warn (fun m -> m "%s neither src nor archive present" filename); None
           in
