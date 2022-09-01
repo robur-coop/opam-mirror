@@ -219,7 +219,8 @@ let single_h2_request ~sleep ?config ~scheme flow user_pass host meth path heade
   Lwt.async (fun () -> Paf.run (module H2.Client_connection) ~sleep conn flow) ;
   Option.iter (H2.Body.Writer.write_string request_body) body ;
   H2.Body.Writer.close request_body ;
-  finished
+  finished >|= fun v ->
+  H2.Client_connection.shutdown conn ; v
 
 let decode_uri ~ctx uri =
   let ( >>= ) = Result.bind in
