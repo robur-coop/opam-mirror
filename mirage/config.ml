@@ -77,9 +77,13 @@ let program_block_size =
   let doc = Key.Arg.info [ "program-block-size" ] in
   Key.(create "program_block_size" Arg.(opt int 16 doc))
 
+(*
 let kv_rw =
   let block = block_of_file "db" in
   chamelon ~program_block_size block
+*)
+
+let kv_rw = direct_kv_rw "/tmp/mirror"
 
 let () = register "mirror"
     [ mirror $ kv_rw $ default_time $ default_posix_clock $ stack $ git_client $ http_client ]
