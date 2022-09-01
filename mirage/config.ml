@@ -3,8 +3,17 @@ open Mirage
 type http_client = HTTP_client
 let http_client = typ HTTP_client
 
+let check =
+  let doc =
+    Key.Arg.info
+      ~doc:"Only check the cache"
+      ["check"]
+  in
+  Key.(create "check" Arg.(flag doc))
+
 let remote =
-  let doc = Key.Arg.info
+  let doc =
+    Key.Arg.info
       ~doc:"Remote repository url, use suffix #foo to specify a branch 'foo': \
             https://github.com/ocaml/opam-repository.git"
       ["remote"]
@@ -20,7 +29,7 @@ let tls_authenticator =
 
 let mirror =
   foreign "Unikernel.Make"
-    ~keys:[ Key.v remote ; Key.v tls_authenticator ]
+    ~keys:[ Key.v check ; Key.v remote ; Key.v tls_authenticator ]
     ~packages:[
       package "paf" ;
       package "h2" ;

@@ -359,30 +359,44 @@ module Make
   let one_request = Http_mirage_client.one_request ~alpn_protocol:HTTP.alpn_protocol
     ~authenticator:HTTP.authenticator
 
-  let start kv _time _pclock stack git_ctx http_ctx =
-    Git.connect git_ctx >>= fun (store, upstream) ->
-    Git.pull store upstream >>= function
-    | Error `Msg msg -> Lwt.fail_with msg
-    | Ok msg ->
-      Logs.info (fun m -> m "git: %s" msg);
-      Git.find_urls store >>= fun urls ->
-      Disk.init kv >>= fun disk ->
-      let pool = Lwt_pool.create 20 (Fun.const Lwt.return_unit) in
-      Lwt_list.iter_p (fun (url, csums) ->
-          Lwt_pool.use pool @@ fun () ->
-          HM.fold (fun h v r ->
-              r >>= function
-              | true -> Disk.exists disk h (hex_to_string v)
-              | false -> Lwt.return false)
-            csums (Lwt.return true) >>= function
-          | true ->
-            Logs.info (fun m -> m "ignoring %s (already present)" url);
-            Lwt.return_unit
-          | false ->
-            Logs.info (fun m -> m "downloading %s" url);
-            one_request ~ctx:http_ctx url >>= function
-            | Ok (resp, Some str) -> Disk.write disk str csums
-            | _ -> Lwt.return_unit)
-        (SM.bindings urls) >|= fun () ->
-      Logs.info (fun m -> m "done")
+  let start kv _time _pclock _stack git_ctx http_ctx =
+    Disk.init kv >>= fun disk ->
+    if Key_gen.check () then begin
+      Logs.info (fun m -> m "done");
+      Lwt.return_unit
+    end else
+      Git.connect git_ctx >>= fun (store, upstream) ->
+      Git.pull store upstream >>= function
+      | Error `Msg msg -> Lwt.fail_with msg
+      | Ok msg ->
+        Logs.info (fun m -> m "git: %s" msg);
+        Git.find_urls store >>= fun urls ->
+        let pool = Lwt_pool.create 20 (Fun.const Lwt.return_unit) in
+        Lwt_list.iter_p (fun (url, csums) ->
+            Lwt_pool.use pool @@ fun () ->
+            HM.fold (fun h v r ->
+                r >>= function
+                | true -> Disk.exists disk h (hex_to_string v)
+                | false -> Lwt.return false)
+              csums (Lwt.return true) >>= function
+            | true ->
+              Logs.debug (fun m -> m "ignoring %s (already present)" url);
+              Lwt.return_unit
+            | false ->
+              Logs.info (fun m -> m "downloading %s" url);
+              one_request ~ctx:http_ctx url >>= function
+              | Ok (resp, Some str) ->
+                Logs.info (fun m -> m "downloaded %s" url);
+                if resp.status = `OK then
+                  Disk.write disk str csums
+                else begin
+                  Logs.warn (fun m -> m "received for %s: %a (reason %s) (headers %a)"
+                                url H2.Status.pp_hum resp.status resp.reason
+                                H2.Headers.pp_hum resp.headers
+                            );
+                  Lwt.return_unit
+                end
+              | _ -> Lwt.return_unit)
+          (SM.bindings urls) >|= fun () ->
+        Logs.info (fun m -> m "done")
 end
