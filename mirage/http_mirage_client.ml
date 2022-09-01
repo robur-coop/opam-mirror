@@ -323,16 +323,17 @@ let one_request
   then single_request ~ctx ~alpn_protocol ?config tls_config ~meth ~headers ?body uri
   else
     let rec follow_redirect count uri =
-      if count = 0 then Lwt.return_error (`Msg "Redirect limit exceeded") 
+      if count = 0 then Lwt.return_error (`Msg "Redirect limit exceeded")
       else
         single_request ~ctx ~alpn_protocol ?config tls_config ~meth ~headers ?body uri
         >>? fun (resp, body) ->
-        match resp.status with
-        | #Status.redirection ->
+        if Status.is_redirection resp.status then
           ( match Headers.get resp.headers "location" with
           | Some location ->
             Lwt.return (resolve_location ~uri ~location) >>? fun uri ->
             follow_redirect (pred count) uri
-          | None -> Lwt.return_ok (resp, body) )
-        | _ -> Lwt.return_ok (resp, body) in
+          | None ->
+            Lwt.return_ok (resp, body) )
+        else
+          Lwt.return_ok (resp, body) in
     follow_redirect max_redirect uri
