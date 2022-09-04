@@ -339,9 +339,7 @@ module Make
         | `SHA256 -> Some key
         | _ -> None
       with
-      | None ->
-        (* Logs.err (fun m -> m "couldn't find %s" v); *)
-        Error `Not_found
+      | None -> Error `Not_found
       | Some x -> Ok x
 
     let exists t h v =
@@ -634,7 +632,8 @@ stamp: %S
               Lwt.return_unit
             end
           | _ -> Lwt.return_unit)
-      (SM.bindings urls)
+      (SM.bindings urls) >|= fun () ->
+    Logs.info (fun m -> m "downloading of %d urls done" (SM.cardinal urls))
 
   module Paf = Paf_mirage.Make(Time)(Stack.TCP)
 
