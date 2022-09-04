@@ -129,6 +129,7 @@ let prepare_http_1_1_headers headers host user_pass body_length =
   add_authentication ~add headers user_pass
 
 let single_http_1_1_request ~sleep ?config flow user_pass host meth path headers body =
+  Logs.info (fun m -> m "http 1.1 request %s path %s" host path);
   let body_length = Option.map String.length body in
   let headers = prepare_http_1_1_headers headers host user_pass body_length in
   let req = Httpaf.Request.create ~headers meth path in
@@ -166,7 +167,9 @@ let single_http_1_1_request ~sleep ?config flow user_pass host meth path headers
   Lwt.async (fun () -> Paf.run (module HTTP_1_1) ~sleep conn flow) ;
   Option.iter (Httpaf.Body.write_string request_body) body ;
   Httpaf.Body.close_writer request_body ;
-  finished
+  finished >|= fun r ->
+  Logs.info (fun m -> m "http 1.1 request %s path %s finished" host path);
+  r
 
 let prepare_h2_headers headers host user_pass body_length =
   let headers = H2.Headers.of_list headers in
@@ -176,6 +179,7 @@ let prepare_h2_headers headers host user_pass body_length =
   add_authentication ~add headers user_pass
 
 let single_h2_request ~sleep ?config ~scheme flow user_pass host meth path headers body =
+  Logs.info (fun m -> m "http2 request %s path %s" host path);
   let body_length = Option.map String.length body in
   let headers = prepare_h2_headers headers host user_pass body_length in
   let req = H2.Request.create ~scheme ~headers meth path in
@@ -220,7 +224,9 @@ let single_h2_request ~sleep ?config ~scheme flow user_pass host meth path heade
   Option.iter (H2.Body.Writer.write_string request_body) body ;
   H2.Body.Writer.close request_body ;
   finished >|= fun v ->
-  H2.Client_connection.shutdown conn ; v
+  H2.Client_connection.shutdown conn ;
+  Logs.info (fun m -> m "http2 request %s path %s finished" host path);
+  v
 
 let decode_uri ~ctx uri =
   let ( >>= ) = Result.bind in

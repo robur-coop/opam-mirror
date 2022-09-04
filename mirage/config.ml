@@ -28,6 +28,10 @@ let remote =
   in
   Key.(create "remote" Arg.(opt string "https://github.com/ocaml/opam-repository.git#master" doc))
 
+let port =
+  let doc = Key.Arg.info ~doc:"HTTP listen port." ["port"] in
+  Key.(create "port" Arg.(opt int 80 doc))
+
 let tls_authenticator =
   (* this will not look the same in the help printout *)
   let doc = "TLS host authenticator. See git_http in lib/mirage/mirage.mli for a description of the format."
@@ -37,14 +41,15 @@ let tls_authenticator =
 
 let mirror =
   foreign "Unikernel.Make"
-    ~keys:[ Key.v key_hex ; Key.v check ; Key.v remote ; Key.v tls_authenticator ]
+    ~keys:[ Key.v key_hex ; Key.v check ; Key.v remote ; Key.v tls_authenticator ; Key.v port ]
     ~packages:[
-      package "paf" ;
+      package ~min:"0.1.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
       package "httpaf" ;
       package ~min:"3.0.0" "irmin-mirage-git" ;
       package ~min:"3.7.0" "git-paf" ;
       package "opam-file-format" ;
+      package ~min:"2.1.0" ~sublibs:[ "gz" ] "tar" ;
     ]
     (kv_rw @-> time @-> pclock @-> stackv4v6 @-> git_client @-> http_client @-> job)
 
