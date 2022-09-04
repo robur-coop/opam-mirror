@@ -28,6 +28,13 @@ let remote =
   in
   Key.(create "remote" Arg.(opt string "https://github.com/ocaml/opam-repository.git#master" doc))
 
+let hook_url =
+  let doc =
+    Key.Arg.info
+      ~doc:"URL to conduct an update of the git repository" ["hook-url"]
+  in
+  Key.(create "hook-url" Arg.(opt string "update" doc))
+
 let port =
   let doc = Key.Arg.info ~doc:"HTTP listen port." ["port"] in
   Key.(create "port" Arg.(opt int 80 doc))
@@ -41,7 +48,7 @@ let tls_authenticator =
 
 let mirror =
   foreign "Unikernel.Make"
-    ~keys:[ Key.v key_hex ; Key.v check ; Key.v remote ; Key.v tls_authenticator ; Key.v port ]
+    ~keys:[ Key.v key_hex ; Key.v check ; Key.v remote ; Key.v hook_url ; Key.v tls_authenticator ; Key.v port ]
     ~packages:[
       package ~min:"0.1.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;

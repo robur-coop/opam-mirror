@@ -451,9 +451,7 @@ module Make
       Fmt.to_to_string (Irmin.Type.pp Store.Hash.t) (Store.Commit.hash commit)
 
     let repo commit =
-      let upstream = List.hd (String.split_on_char '#' (Key_gen.remote ()))
-      and commit = commit_id commit
-      in
+      let upstream = List.hd (String.split_on_char '#' (Key_gen.remote ())) in
       Fmt.str
         {|opam-version: "2.0"
 upstream: "%s#%s"
@@ -470,17 +468,41 @@ stamp: %S
       ptime_to_http_date ptime
 
     type t = {
-      commit_id : string ;
-      modified : string ;
-      repo : string ;
-      index : string ;
+      mutable commit_id : string ;
+      mutable modified : string ;
+      mutable repo : string ;
+      mutable index : string ;
     }
 
-    let create commit repo index =
+    let create commit store =
       let commit_id = commit_id commit
       and modified = modified commit
       in
+      let repo = repo commit_id in
+      Tarball.of_git repo store >|= fun index ->
       { commit_id ; modified ; repo ; index }
+
+    let update_lock = Lwt_mutex.create ()
+
+    let update_git t git_ctx =
+      Lwt_mutex.with_lock update_lock (fun () ->
+          Git.connect git_ctx >>= fun (store, upstream) ->
+          Git.pull store upstream >>= function
+          | Error `Msg msg ->
+            Logs.err (fun m -> m "error %s while updating git" msg);
+            Lwt.return None
+          | Ok (commit, msg) ->
+            Logs.info (fun m -> m "git: %s" msg);
+            let commit_id = commit_id commit
+            and modified = modified commit
+            in
+            let repo = repo commit_id in
+            Tarball.of_git repo store >|= fun index ->
+            t.commit_id <- commit_id ;
+            t.modified <- modified ;
+            t.repo <- repo ;
+            t.index <- index;
+            Some store)
 
     let not_modified request (modified, etag) =
       match Httpaf.Headers.get request.Httpaf.Request.headers "if-modified-since" with
@@ -517,10 +539,26 @@ stamp: %S
           let resp = Httpaf.Response.create `Not_modified in
           respond_with_empty reqd resp
         else *)
-    let dispatch t store _flow _conn reqd =
+    let dispatch t store hook_url git_ctx update _flow _conn reqd =
       let request = Httpaf.Reqd.request reqd in
       Logs.info (fun f -> f "requested %s" request.Httpaf.Request.target);
       match String.split_on_char '/' request.Httpaf.Request.target with
+      | [ ""; x ] when String.equal x hook_url ->
+        Lwt.async (fun () ->
+            update_git t git_ctx >>= function
+            | None -> Lwt.return_unit
+            | Some store -> update store);
+        let data = "Update in progress" in
+        let mime_type = "text/plain" in
+        let headers = [
+          "content-type", mime_type ;
+          "etag", t.commit_id ;
+          "last-modified", t.modified ;
+          "content-length", string_of_int (String.length data) ;
+        ] in
+        let headers = Httpaf.Headers.of_list headers in
+        let resp = Httpaf.Response.create ~headers `OK in
+        Httpaf.Reqd.respond_with_string reqd resp data
       | [ ""; "repo" ] ->
         if not_modified request (t.modified, t.commit_id) then
           let resp = Httpaf.Response.create `Not_modified in
@@ -640,14 +678,13 @@ stamp: %S
       | Error `Msg msg -> Lwt.fail_with msg
       | Ok (commit, msg) ->
         Logs.info (fun m -> m "git: %s" msg);
-        let repo = Serve.repo commit in
-        Tarball.of_git repo store >>= fun index ->
-        let serve = Serve.create commit repo index in
+        Serve.create commit store >>= fun serve ->
         Paf.init ~port:(Key_gen.port ()) (Stack.tcp stack) >>= fun t ->
+        let update store = download_archives disk http_ctx store in
         let service =
           Paf.http_service
             ~error_handler:(fun _ ?request:_ _ _ -> ())
-            (Serve.dispatch serve disk)
+            (Serve.dispatch serve disk (Key_gen.hook_url ()) git_ctx update)
         in
         let `Initialized th = Paf.serve service t in
         Logs.info (fun f -> f "listening on %d/HTTP" (Key_gen.port ()));
