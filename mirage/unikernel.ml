@@ -1,10 +1,3 @@
-module type DNS = sig
-  type t
-
-  val gethostbyname : t -> [ `host ] Domain_name.t ->
-    (Ipaddr.V4.t, [> `Msg of string ]) result Lwt.t
-end
-
 open Lwt.Infix
 
 let argument_error = 64
