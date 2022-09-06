@@ -58,7 +58,7 @@ let mirror =
       package "opam-file-format" ;
       package ~min:"2.1.0" ~sublibs:[ "gz" ] "tar" ;
     ]
-    (kv_rw @-> time @-> pclock @-> stackv4v6 @-> git_client @-> http_client @-> job)
+    (kv_ro @-> time @-> pclock @-> stackv4v6 @-> git_client @-> http_client @-> job)
 
 let stack = generic_stackv4v6 default_network
 
@@ -95,7 +95,11 @@ let kv_rw =
   chamelon ~program_block_size block
 *)
 
-let kv_rw = direct_kv_rw "/tmp/mirror"
+(* let kv_rw = direct_kv_rw "/tmp/mirror" *)
+
+let kv_ro =
+  let block = block_of_file "tar" in
+  archive block
 
 let () = register "mirror"
-    [ mirror $ kv_rw $ default_time $ default_posix_clock $ stack $ git_client $ http_client ]
+    [ mirror $ kv_ro $ default_time $ default_posix_clock $ stack $ git_client $ http_client ]

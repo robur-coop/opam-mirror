@@ -3,7 +3,7 @@ open Lwt.Infix
 let argument_error = 64
 
 module Make
-  (KV : Mirage_kv.RW)
+  (KV : Mirage_kv.RO)
   (Time : Mirage_time.S)
   (Pclock : Mirage_clock.PCLOCK)
   (Stack : Tcpip.Stack.V4V6)
@@ -271,17 +271,18 @@ module Make
                   and sha512s = SM.add sha512 name t.sha512s
                   in
                   t.md5s <- md5s ; t.sha512s <- sha512s;
-                  Logs.debug (fun m -> m "added %s" (key_to_string t name));
+                  Logs.info (fun m -> m "added %s" (key_to_string t name));
                   Lwt.return_unit
                 end else begin
-                  Logs.err (fun m -> m "corrupt data, expected %s, read %s"
+                  Logs.err (fun m -> m "corrupt data, expected %s, read %s (should remove)"
                                (key_to_string t name)
                                (hex_to_string (Cstruct.to_string digest)));
-                  KV.remove dev (Mirage_kv.Key.v name) >|= function
+                  (*KV.remove dev (Mirage_kv.Key.v name) >|= function
                   | Ok () -> ()
                   | Error e ->
                     Logs.err (fun m -> m "error %a while removing %s"
-                                 KV.pp_write_error e (key_to_string t name))
+                                 KV.pp_write_error e (key_to_string t name)) *)
+                  Lwt.return_unit
                 end
               | Error e ->
                 Logs.err (fun m -> m "error %a reading %s"
@@ -310,7 +311,9 @@ module Make
               false
             end) hm
       then begin
-        KV.set t.dev (Mirage_kv.Key.v sha256) data >|= function
+        Logs.warn (fun m -> m "should set %s" (key_to_string t sha256));
+        Lwt.return_unit
+        (* KV.set t.dev (Mirage_kv.Key.v sha256) data >|= function
         | Ok () ->
           t.md5s <- SM.add md5 sha256 t.md5s;
           t.sha512s <- SM.add sha512 sha256 t.sha512s;
@@ -318,7 +321,7 @@ module Make
                         (String.length data))
         | Error e ->
           Logs.err (fun m -> m "error %a while writing %s (key %s)"
-                       KV.pp_write_error e url (key_to_string t sha256))
+                       KV.pp_write_error e url (key_to_string t sha256)) *)
       end else
         Lwt.return_unit
 
