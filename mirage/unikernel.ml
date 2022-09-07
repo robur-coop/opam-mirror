@@ -22,6 +22,8 @@ module Make
       let compare = compare (* TODO remove polymorphic compare *)
     end)
 
+  module Git_commit = Git.Commit.Make(Store.Git.Hash)
+
   let hash_to_string = function
     | `MD5 -> "md5"
     | `SHA1 -> "sha1"
@@ -495,7 +497,9 @@ stamp: %S
             Logs.err (fun m -> m "error %s while updating git" msg);
             Lwt.return None
           | Ok (commit, msg) ->
-            Logs.info (fun m -> m "git: %s" msg);
+            let l = Encore.to_lavoisier Git_commit.format in
+            let bytes = Encore.Lavoisier.emit_string commit l in
+            Logs.info (fun m -> m "git: %s (%d bytes)" msg (String.length bytes));
             let commit_id = commit_id commit
             and modified = modified commit
             in
@@ -686,7 +690,10 @@ stamp: %S
       Git.pull store upstream >>= function
       | Error `Msg msg -> Lwt.fail_with msg
       | Ok (commit, msg) ->
-        Logs.info (fun m -> m "git: %s" msg);
+(*        let l = Encore.to_lavoisier Git_commit.format in
+          let bytes = Encore.Lavoisier.emit_string commit l in *)
+        let bytes = "foo" in
+        Logs.info (fun m -> m "git: %s (%d bytes)" msg (String.length bytes));
         Serve.create commit store >>= fun serve ->
         Paf.init ~port:(Key_gen.port ()) (Stack.tcp stack) >>= fun t ->
         let update store = download_archives disk http_ctx store in
