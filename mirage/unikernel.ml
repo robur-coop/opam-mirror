@@ -639,6 +639,11 @@ stamp: %S
 
   let download_archives disk http_ctx store =
     Git.find_urls store >>= fun urls ->
+    let urls = SM.filter (fun k _ ->
+        not (String.equal
+               "https://github.com/Opsian/opsian-ocaml/releases/download/0.1/0.1.tar.gz"
+               k)) urls
+    in
     let pool = Lwt_pool.create 20 (Fun.const Lwt.return_unit) in
     Lwt_list.iter_p (fun (url, csums) ->
         Lwt_pool.use pool @@ fun () ->
