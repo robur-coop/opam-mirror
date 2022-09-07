@@ -271,19 +271,21 @@ let single_request ~ctx ~alpn_protocol ?config cfg ~meth ~headers ?body uri =
       | Error _ -> Mimic.add tls_config cfg ctx )
     | Error _ -> ctx in
   Mimic.resolve ctx >>? fun flow ->
-  match Option.bind (alpn_protocol flow) alpn_protocol_of_string, config with
-  | (Some `HTTP_1_1 | None), Some (`HTTP_1_1 config) ->
-    single_http_1_1_request ~sleep ~config flow user_pass host meth path headers body
-  | (Some `HTTP_1_1 | None), None ->
-    single_http_1_1_request ~sleep flow user_pass host meth path headers body
-  | (Some `H2 | None), Some (`H2 config) ->
-    single_h2_request ~sleep ~config ~scheme flow user_pass host meth path headers body
-  | Some `H2, None ->
-    single_h2_request ~sleep ~scheme flow user_pass host meth path headers body
-  | Some `H2, (Some (`HTTP_1_1 _)) ->
-    single_h2_request ~sleep ~scheme flow user_pass host meth path headers body
-  | Some `HTTP_1_1, Some (`H2 _) ->
-    single_http_1_1_request ~sleep flow user_pass host meth path headers body
+  (match Option.bind (alpn_protocol flow) alpn_protocol_of_string, config with
+   | (Some `HTTP_1_1 | None), Some (`HTTP_1_1 config) ->
+     single_http_1_1_request ~sleep ~config flow user_pass host meth path headers body
+   | (Some `HTTP_1_1 | None), None ->
+     single_http_1_1_request ~sleep flow user_pass host meth path headers body
+   | (Some `H2 | None), Some (`H2 config) ->
+     single_h2_request ~sleep ~config ~scheme flow user_pass host meth path headers body
+   | Some `H2, None ->
+     single_h2_request ~sleep ~scheme flow user_pass host meth path headers body
+   | Some `H2, (Some (`HTTP_1_1 _)) ->
+     single_h2_request ~sleep ~scheme flow user_pass host meth path headers body
+   | Some `HTTP_1_1, Some (`H2 _) ->
+     single_http_1_1_request ~sleep flow user_pass host meth path headers body) >>= fun r ->
+  Mimic.close flow >|= fun () ->
+  r
 
 let tls_config ?tls_config ?config authenticator =
   lazy ( match tls_config with
