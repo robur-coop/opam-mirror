@@ -57,8 +57,9 @@ let mirror =
       package ~min:"3.7.0" "git-paf" ;
       package "opam-file-format" ;
       package ~min:"2.1.0" ~sublibs:[ "gz" ] "tar" ;
+      package "tar-mirage" ;
     ]
-    (kv_ro @-> time @-> pclock @-> stackv4v6 @-> git_client @-> http_client @-> job)
+    (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> http_client @-> job)
 
 let stack = generic_stackv4v6 default_network
 
@@ -89,6 +90,8 @@ let program_block_size =
   let doc = Key.Arg.info [ "program-block-size" ] in
   Key.(create "program_block_size" Arg.(opt int 16 doc))
 
+let block = block_of_file "tar"
+
 (*
 let kv_rw =
   let block = block_of_file "db" in
@@ -97,9 +100,11 @@ let kv_rw =
 
 (* let kv_rw = direct_kv_rw "/tmp/mirror" *)
 
+(*
 let kv_ro =
   let block = block_of_file "tar" in
   archive block
+*)
 
 let () = register "mirror"
-    [ mirror $ kv_ro $ default_time $ default_posix_clock $ stack $ git_client $ http_client ]
+    [ mirror $ block $ default_time $ default_posix_clock $ stack $ git_client $ http_client ]

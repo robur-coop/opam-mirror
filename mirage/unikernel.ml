@@ -3,12 +3,14 @@ open Lwt.Infix
 let argument_error = 64
 
 module Make
-  (KV : Mirage_kv.RO)
+  (BLOCK : Mirage_block.S)
   (Time : Mirage_time.S)
   (Pclock : Mirage_clock.PCLOCK)
   (Stack : Tcpip.Stack.V4V6)
   (_ : sig end)
   (HTTP : Http_mirage_client.S) = struct
+
+  module KV = Tar_mirage.Make_KV_RW(BLOCK)
 
   module Store = Irmin_mirage_git.Mem.KV.Make(Irmin.Contents.String)
   module Sync = Irmin.Sync.Make(Store)
@@ -311,9 +313,7 @@ module Make
               false
             end) hm
       then begin
-        Logs.warn (fun m -> m "should set %s" (key_to_string t sha256));
-        Lwt.return_unit
-        (* KV.set t.dev (Mirage_kv.Key.v sha256) data >|= function
+        KV.set t.dev (Mirage_kv.Key.v sha256) data >|= function
         | Ok () ->
           t.md5s <- SM.add md5 sha256 t.md5s;
           t.sha512s <- SM.add sha512 sha256 t.sha512s;
@@ -321,7 +321,7 @@ module Make
                         (String.length data))
         | Error e ->
           Logs.err (fun m -> m "error %a while writing %s (key %s)"
-                       KV.pp_write_error e url (key_to_string t sha256)) *)
+                       KV.pp_write_error e url (key_to_string t sha256))
       end else
         Lwt.return_unit
 
@@ -656,7 +656,7 @@ stamp: %S
           Logs.debug (fun m -> m "ignoring %s (already present)" url);
           Lwt.return_unit
         | false ->
-          Logs.debug (fun m -> m "downloading %s" url);
+          Logs.info (fun m -> m "downloading %s" url);
           Http_mirage_client.one_request
             ~alpn_protocol:HTTP.alpn_protocol
             ~authenticator:HTTP.authenticator
@@ -676,7 +676,8 @@ stamp: %S
 
   module Paf = Paf_mirage.Make(Time)(Stack.TCP)
 
-  let start kv _time _pclock stack git_ctx http_ctx =
+  let start block _time _pclock stack git_ctx http_ctx =
+    KV.connect block >>= fun kv ->
     let key_hex = Key_gen.key_hex () in
     Disk.init ~key_hex kv >>= fun disk ->
     if Key_gen.check () then Lwt.return_unit
