@@ -497,8 +497,9 @@ stamp: %S
             Logs.err (fun m -> m "error %s while updating git" msg);
             Lwt.return None
           | Ok (commit, msg) ->
-            let l = Encore.to_lavoisier Git_commit.format in
-            let bytes = Encore.Lavoisier.emit_string commit l in
+(*            let l = Encore.to_lavoisier Git_commit.format in
+              let bytes = Encore.Lavoisier.emit_string commit l in *)
+            let bytes = "foo" in
             Logs.info (fun m -> m "git: %s (%d bytes)" msg (String.length bytes));
             let commit_id = commit_id commit
             and modified = modified commit
