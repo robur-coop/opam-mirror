@@ -3,14 +3,6 @@ open Mirage
 type http_client = HTTP_client
 let http_client = typ HTTP_client
 
-let key_hex =
-  let doc =
-    Key.Arg.info
-      ~doc:"File system keys should be stored as human-readable (hex) characters"
-      ["key-hex"]
-  in
-  Key.(create "key-hex" Arg.(flag doc))
-
 let check =
   let doc =
     Key.Arg.info
@@ -48,7 +40,7 @@ let tls_authenticator =
 
 let mirror =
   foreign "Unikernel.Make"
-    ~keys:[ Key.v key_hex ; Key.v check ; Key.v remote ; Key.v hook_url ; Key.v tls_authenticator ; Key.v port ]
+    ~keys:[ Key.v check ; Key.v remote ; Key.v hook_url ; Key.v tls_authenticator ; Key.v port ]
     ~packages:[
       package ~min:"0.1.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
@@ -57,7 +49,7 @@ let mirror =
       package ~min:"3.7.0" "git-paf" ;
       package "opam-file-format" ;
       package ~min:"2.1.0" ~sublibs:[ "gz" ] "tar" ;
-      package "tar-mirage" ;
+      package ~pin:"git+https://github.com/hannesm/ocaml-tar.git#kv-rw" "tar-mirage" ;
     ]
     (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> http_client @-> job)
 
@@ -91,20 +83,6 @@ let program_block_size =
   Key.(create "program_block_size" Arg.(opt int 16 doc))
 
 let block = block_of_file "tar"
-
-(*
-let kv_rw =
-  let block = block_of_file "db" in
-  chamelon ~program_block_size block
-*)
-
-(* let kv_rw = direct_kv_rw "/tmp/mirror" *)
-
-(*
-let kv_ro =
-  let block = block_of_file "tar" in
-  archive block
-*)
 
 let () = register "mirror"
     [ mirror $ block $ default_time $ default_posix_clock $ stack $ git_client $ http_client ]

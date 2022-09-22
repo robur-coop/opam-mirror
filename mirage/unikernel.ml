@@ -226,37 +226,24 @@ module Make
     type t = {
       mutable md5s : string SM.t ;
       mutable sha512s : string SM.t ;
-      key_hex : bool ;
       dev : KV.t ;
     }
 
-    let empty key_hex dev = { md5s = SM.empty ; sha512s = SM.empty ; key_hex ; dev }
+    let empty dev = { md5s = SM.empty ; sha512s = SM.empty ; dev }
 
     let key t d =
       let d = Cstruct.to_string d in
-      if t.key_hex then hex_to_string d else d
-
-    let key_to_string t d = if t.key_hex then d else hex_to_string d
-
-    let key_of_string t v =
-      if t.key_hex then
-        Ok v
-      else
-        match hex_of_string v with
-        | Error `Msg msg ->
-          Logs.err (fun m -> m "error %s while decoding hex %s" msg v);
-          Error `Bad_request
-        | Ok bin -> Ok bin
+      hex_to_string d
 
     (* on disk, we use a flat file system where the filename is the sha256 of the data *)
     (* on startup, we read + validate all data, and also store in the overlays (md5/sha512) the pointers *)
     (* the read can be md5/sha256/sha512 sum, and will output the data requested *)
     (* a write will compute the hashes and save the data (also validating potential other hashes) *)
-    let init ?(key_hex = false) dev =
+    let init dev =
       KV.list dev Mirage_kv.Key.empty >>= function
       | Error e -> Logs.err (fun m -> m "error %a listing kv" KV.pp_error e); assert false
       | Ok entries ->
-        let t = empty key_hex dev in
+        let t = empty dev in
         Lwt_list.iter_s (fun (name, typ) ->
             match typ with
             | `Dictionary ->
@@ -275,12 +262,11 @@ module Make
                   and sha512s = SM.add sha512 name t.sha512s
                   in
                   t.md5s <- md5s ; t.sha512s <- sha512s;
-                  Logs.info (fun m -> m "added %s" (key_to_string t name));
+                  Logs.info (fun m -> m "added %s" name);
                   Lwt.return_unit
                 end else begin
                   Logs.err (fun m -> m "corrupt data, expected %s, read %s (should remove)"
-                               (key_to_string t name)
-                               (hex_to_string (Cstruct.to_string digest)));
+                               name (hex_to_string (Cstruct.to_string digest)));
                   (*KV.remove dev (Mirage_kv.Key.v name) >|= function
                   | Ok () -> ()
                   | Error e ->
@@ -290,7 +276,7 @@ module Make
                 end
               | Error e ->
                 Logs.err (fun m -> m "error %a reading %s"
-                             KV.pp_error e (key_to_string t name));
+                             KV.pp_error e name);
                 Lwt.return_unit)
           entries >|= fun () ->
         t
@@ -306,12 +292,12 @@ module Make
             let v' =
               match h with `MD5 -> md5 | `SHA256 -> sha256 | `SHA512 -> sha512 | _ -> assert false
             in
-            let v = if t.key_hex then hex_to_string v else v in
+            let v = hex_to_string v in
             if String.equal v v' then
               true
             else begin
               Logs.err (fun m -> m "%s hash mismatch %s: expected %s, got %s" url
-                           (hash_to_string h) (key_to_string t v) (key_to_string t v'));
+                           (hash_to_string h) v v');
               false
             end) hm
       then begin
@@ -319,17 +305,15 @@ module Make
         | Ok () ->
           t.md5s <- SM.add md5 sha256 t.md5s;
           t.sha512s <- SM.add sha512 sha256 t.sha512s;
-          Logs.debug (fun m -> m "wrote %s (%d bytes)" (key_to_string t sha256)
-                        (String.length data))
+          Logs.debug (fun m -> m "wrote %s (%d bytes)" sha256
+                         (String.length data))
         | Error e ->
           Logs.err (fun m -> m "error %a while writing %s (key %s)"
-                       KV.pp_write_error e url (key_to_string t sha256))
+                       KV.pp_write_error e url sha256)
       end else
         Lwt.return_unit
 
-    let find_key t h v =
-      let ( let* ) = Result.bind in
-      let* key = key_of_string t v in
+    let find_key t h key =
       match
         match h with
         | `MD5 -> SM.find_opt key t.md5s
@@ -348,13 +332,12 @@ module Make
         | Ok Some `Value -> true
         | Ok Some `Dictionary ->
           Logs.err (fun m -> m "unexpected dictionary for %s %s"
-                       (hash_to_string h) (key_to_string t v));
+                       (hash_to_string h) v);
           false
         | Ok None -> false
         | Error e ->
           Logs.err (fun m -> m "exists %s %s returned %a"
-                       (hash_to_string h) (key_to_string t v)
-                       KV.pp_error e);
+                       (hash_to_string h) v KV.pp_error e);
           false
 
     let read t h v =
@@ -497,10 +480,7 @@ stamp: %S
             Logs.err (fun m -> m "error %s while updating git" msg);
             Lwt.return None
           | Ok (commit, msg) ->
-(*            let l = Encore.to_lavoisier Git_commit.format in
-              let bytes = Encore.Lavoisier.emit_string commit l in *)
-            let bytes = "foo" in
-            Logs.info (fun m -> m "git: %s (%d bytes)" msg (String.length bytes));
+            Logs.info (fun m -> m "git: %s" msg);
             let commit_id = commit_id commit
             and modified = modified commit
             in
@@ -683,20 +663,16 @@ stamp: %S
 
   let start block _time _pclock stack git_ctx http_ctx =
     KV.connect block >>= fun kv ->
-    let key_hex = Key_gen.key_hex () in
-    Disk.init ~key_hex kv >>= fun disk ->
+    Disk.init kv >>= fun disk ->
     if Key_gen.check () then Lwt.return_unit
     else
       Git.connect git_ctx >>= fun (store, upstream) ->
       Git.pull store upstream >>= function
       | Error `Msg msg -> Lwt.fail_with msg
       | Ok (commit, msg) ->
-(*        let l = Encore.to_lavoisier Git_commit.format in
-          let bytes = Encore.Lavoisier.emit_string commit l in *)
-        let bytes = "foo" in
-        Logs.info (fun m -> m "git: %s (%d bytes)" msg (String.length bytes));
+        Logs.info (fun m -> m "git: %s" msg);
         Serve.create commit store >>= fun serve ->
-        Paf.init ~port:(Key_gen.port ()) (Stack.tcp stack) >>= fun t ->
+        Paf.init ~port:(Key_gen.port ()) (S1tack.tcp stack) >>= fun t ->
         let update store = download_archives disk http_ctx store in
         let service =
           Paf.http_service
