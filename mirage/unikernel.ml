@@ -672,7 +672,7 @@ stamp: %S
       | Ok (commit, msg) ->
         Logs.info (fun m -> m "git: %s" msg);
         Serve.create commit store >>= fun serve ->
-        Paf.init ~port:(Key_gen.port ()) (S1tack.tcp stack) >>= fun t ->
+        Paf.init ~port:(Key_gen.port ()) (Stack.tcp stack) >>= fun t ->
         let update store = download_archives disk http_ctx store in
         let service =
           Paf.http_service
