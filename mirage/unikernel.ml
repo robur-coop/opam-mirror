@@ -629,7 +629,7 @@ stamp: %S
                "https://github.com/Opsian/opsian-ocaml/releases/download/0.1/0.1.tar.gz"
                k)) urls
     in
-    let pool = Lwt_pool.create 20 (Fun.const Lwt.return_unit) in
+    let pool = Lwt_pool.create (Key_gen.parallel_downloads ()) (Fun.const Lwt.return_unit) in
     Lwt_list.iter_p (fun (url, csums) ->
         Lwt_pool.use pool @@ fun () ->
         HM.fold (fun h v r ->
