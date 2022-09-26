@@ -209,7 +209,7 @@ module Make
 
     let empty dev dev_md5s dev_sha512s = { md5s = SM.empty ; sha512s = SM.empty ; dev; dev_md5s; dev_sha512s }
 
-    let key _t d =
+    let to_hex d =
       let d = Cstruct.to_string d in
       hex_to_string d
 
@@ -283,7 +283,7 @@ module Make
                 if verify then begin
                   read_data () >|?= fun cs ->
                   let digest = Mirage_crypto.Hash.digest `SHA256 cs in
-                  if not (String.equal name (key t digest)) then
+                  if not (String.equal name (to_hex digest)) then
                     Logs.err (fun m -> m "corrupt data, expected %s, read %s (should remove)"
                                  name (hex_to_string (Cstruct.to_string digest)));
                 end else
@@ -292,7 +292,7 @@ module Make
               begin
                 if not (SSet.mem name md5s) then begin
                   read_data () >|?= fun cs ->
-                  let md5 = Mirage_crypto.Hash.digest `MD5 cs |> key t in
+                  let md5 = Mirage_crypto.Hash.digest `MD5 cs |> to_hex in
                   let md5s = SM.add md5 name t.md5s in
                   t.md5s <- md5s
                 end else
@@ -301,7 +301,7 @@ module Make
               begin
                 if not (SSet.mem name sha512s) then begin
                   read_data () >|?= fun cs ->
-                  let sha512 = Mirage_crypto.Hash.digest `SHA512 cs |> key t in
+                  let sha512 = Mirage_crypto.Hash.digest `SHA512 cs |> to_hex in
                   let sha512s = SM.add sha512 name t.sha512s in
                   t.sha512s <- sha512s
                 end else
@@ -314,9 +314,9 @@ module Make
 
     let write t ~url data hm =
       let cs = Cstruct.of_string data in
-      let sha256 = Mirage_crypto.Hash.digest `SHA256 cs |> key t
-      and md5 = Mirage_crypto.Hash.digest `MD5 cs |> key t
-      and sha512 = Mirage_crypto.Hash.digest `SHA512 cs |> key t
+      let sha256 = Mirage_crypto.Hash.digest `SHA256 cs |> to_hex
+      and md5 = Mirage_crypto.Hash.digest `MD5 cs |> to_hex
+      and sha512 = Mirage_crypto.Hash.digest `SHA512 cs |> to_hex
       in
       if
         HM.for_all (fun h v ->
@@ -555,7 +555,7 @@ stamp: %S
           let resp = Httpaf.Response.create `Not_modified in
           respond_with_empty reqd resp
         else *)
-    let dispatch t store hook_url _git_kv update _flow _conn reqd =
+    let dispatch t store hook_url update _flow _conn reqd =
       let request = Httpaf.Reqd.request reqd in
       Logs.info (fun f -> f "requested %s" request.Httpaf.Request.target);
       match String.split_on_char '/' request.Httpaf.Request.target with
@@ -717,7 +717,7 @@ stamp: %S
       let service =
         Paf.http_service
           ~error_handler:(fun _ ?request:_ _ _ -> ())
-          (Serve.dispatch serve disk (Key_gen.hook_url ()) git_kv update)
+          (Serve.dispatch serve disk (Key_gen.hook_url ()) update)
       in
       let `Initialized th = Paf.serve service t in
       Logs.info (fun f -> f "listening on %d/HTTP" (Key_gen.port ()));
