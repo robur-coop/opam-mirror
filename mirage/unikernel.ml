@@ -244,7 +244,8 @@ module Make
       | Error e -> Logs.err (fun m -> m "error %a listing kv" KV.pp_error e); assert false
       | Ok entries ->
         let t = empty dev in
-        Lwt_list.iter_s (fun (name, typ) ->
+        Lwt_list.iteri_s (fun idx (name, typ) ->
+            if idx mod 10 = 0 then Gc.full_major () ;
             match typ with
             | `Dictionary ->
               Logs.warn (fun m -> m "unexpected dictionary at %s" name);
@@ -630,6 +631,7 @@ stamp: %S
                k)) urls
     in
     let pool = Lwt_pool.create (Key_gen.parallel_downloads ()) (Fun.const Lwt.return_unit) in
+    let idx = ref 0 in
     Lwt_list.iter_p (fun (url, csums) ->
         Lwt_pool.use pool @@ fun () ->
         HM.fold (fun h v r ->
@@ -641,6 +643,8 @@ stamp: %S
           Logs.debug (fun m -> m "ignoring %s (already present)" url);
           Lwt.return_unit
         | false ->
+          incr idx;
+          if !idx mod 10 = 0 then Gc.full_major () ;
           Logs.info (fun m -> m "downloading %s" url);
           Http_mirage_client.one_request
             ~alpn_protocol:HTTP.alpn_protocol
