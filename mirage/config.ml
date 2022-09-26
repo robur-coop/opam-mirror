@@ -5,11 +5,15 @@ let http_client = typ HTTP_client
 
 let check =
   let doc =
-    Key.Arg.info
-      ~doc:"Only check the cache"
-      ["check"]
+    Key.Arg.info ~doc:"Only check the cache" ["check"]
   in
   Key.(create "check" Arg.(flag doc))
+
+let verify =
+  let doc =
+    Key.Arg.info ~doc:"Verify the cache contents" ["verify"]
+  in
+  Key.(create "verify" Arg.(flag doc))
 
 let remote =
   let doc =
@@ -53,7 +57,7 @@ let sectors_cache =
 
 let mirror =
   foreign "Unikernel.Make"
-    ~keys:[ Key.v check ; Key.v remote ; Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ; Key.v port ; Key.v sectors_cache ]
+    ~keys:[ Key.v check ; Key.v verify ; Key.v remote ; Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ; Key.v port ; Key.v sectors_cache ]
     ~packages:[
       package ~min:"0.1.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
