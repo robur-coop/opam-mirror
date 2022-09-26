@@ -449,6 +449,8 @@ stamp: %S
           | Error `Msg msg ->
             Logs.err (fun m -> m "error %s while updating git" msg);
             Lwt.return None
+          | Ok [] ->
+            Lwt.return (Some [])
           | Ok changes ->
             commit_id git_kv >>= fun commit_id ->
             modified git_kv >>= fun modified ->
@@ -644,6 +646,7 @@ stamp: %S
       let update () =
         Serve.update_git serve git_kv >>= function
         | None -> Lwt.return_unit
+        | Some [] -> Lwt.return_unit
         | Some _changes -> download_archives disk http_ctx git_kv
       in
       let service =
