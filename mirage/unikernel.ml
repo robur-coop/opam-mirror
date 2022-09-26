@@ -501,10 +501,7 @@ stamp: %S
       Logs.info (fun f -> f "requested %s" request.Httpaf.Request.target);
       match String.split_on_char '/' request.Httpaf.Request.target with
       | [ ""; x ] when String.equal x hook_url ->
-        Lwt.async (fun () ->
-            update_git t git_kv >>= function
-            | None -> Lwt.return_unit
-            | Some store -> update store);
+        Lwt.async update;
         let data = "Update in progress" in
         let mime_type = "text/plain" in
         let headers = [
@@ -644,7 +641,11 @@ stamp: %S
       Logs.info (fun m -> m "git: %s" commit_id);
       Serve.create git_kv >>= fun serve ->
       Paf.init ~port:(Key_gen.port ()) (Stack.tcp stack) >>= fun t ->
-      let update _changes = download_archives disk http_ctx git_kv in
+      let update () =
+        Serve.update_git serve git_kv >>= function
+        | None -> Lwt.return_unit
+        | Some _changes -> download_archives disk http_ctx git_kv
+      in
       let service =
         Paf.http_service
           ~error_handler:(fun _ ?request:_ _ _ -> ())
@@ -652,6 +653,13 @@ stamp: %S
       in
       let `Initialized th = Paf.serve service t in
       Logs.info (fun f -> f "listening on %d/HTTP" (Key_gen.port ()));
+      Lwt.async (fun () ->
+          let rec go () =
+            Time.sleep_ns (Duration.of_hour 1) >>= fun () ->
+            update () >>= fun () ->
+            go ()
+          in
+          go ());
       download_archives disk http_ctx git_kv >>= fun () ->
       (th >|= fun _v -> ())
 end
