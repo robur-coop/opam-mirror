@@ -46,9 +46,14 @@ let tls_authenticator =
   let doc = Key.Arg.info ~doc ["tls-authenticator"] in
   Key.(create "tls-authenticator" Arg.(opt (some string) None doc))
 
+let sectors_cache =
+  let doc = "Number of sectors reserved for each checksum cache (md5, sha512)." in
+  let doc = Key.Arg.info ~doc ["sectors-cache"] in
+  Key.(create "sectors-cache" Arg.(opt int64 Int64.(mul 4L 2048L) doc))
+
 let mirror =
   foreign "Unikernel.Make"
-    ~keys:[ Key.v check ; Key.v remote ; Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ; Key.v port ]
+    ~keys:[ Key.v check ; Key.v remote ; Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ; Key.v port ; Key.v sectors_cache ]
     ~packages:[
       package ~min:"0.1.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
@@ -58,6 +63,8 @@ let mirror =
       package "opam-file-format" ;
       package ~min:"2.1.0" ~sublibs:[ "gz" ] "tar" ;
       package ~pin:"git+https://github.com/hannesm/ocaml-tar.git#kv-rw" "tar-mirage" ;
+      package ~pin:"git+https://github.com/reynir/mirage-block-partition.git" "mirage-block-partition" ;
+      package ~pin:"git+https://git.robur.io/reynir/oneffs.git" "oneffs" ;
     ]
     (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> http_client @-> job)
 

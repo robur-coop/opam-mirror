@@ -10,9 +10,12 @@ module Make
   (_ : sig end)
   (HTTP : Http_mirage_client.S) = struct
 
-  module KV = Tar_mirage.Make_KV_RW(BLOCK)
+  module Part = Mirage_block_partition.Make(BLOCK)
+  module KV = Tar_mirage.Make_KV_RW(Part)
+  module Cache = OneFFS.Make(Part)
 
   module SM = Map.Make(String)
+  module SSet = Set.Make(String)
 
   module HM = Map.Make(struct
       type t = Mirage_crypto.Hash.hash
@@ -200,23 +203,60 @@ module Make
       mutable md5s : string SM.t ;
       mutable sha512s : string SM.t ;
       dev : KV.t ;
+      dev_md5s : Cache.t ;
+      dev_sha512s : Cache.t ;
     }
 
-    let empty dev = { md5s = SM.empty ; sha512s = SM.empty ; dev }
+    let empty dev dev_md5s dev_sha512s = { md5s = SM.empty ; sha512s = SM.empty ; dev; dev_md5s; dev_sha512s }
 
     let key _t d =
       let d = Cstruct.to_string d in
       hex_to_string d
 
+    let marshal_sm (sm : string SM.t) =
+      let version = char_of_int 1 in
+      String.make 1 version ^ Marshal.to_string sm []
+
+    let unmarshal_sm s =
+      let version = int_of_char s.[0] in
+      match version with
+      | 1 -> Ok (Marshal.from_string s 1 : string SM.t)
+      | _ -> Error ("Unsupported version " ^ string_of_int version)
+
+    let update_caches t =
+      Cache.write t.dev_md5s (marshal_sm t.md5s) >>= fun r ->
+      (match r with
+       | Ok () -> Logs.info (fun m -> m "Set 'md5s'")
+       | Error e -> Logs.warn (fun m -> m "Failed to write 'md5s': %a" Cache.pp_write_error e));
+      Cache.write t.dev_sha512s (marshal_sm t.sha512s) >>= fun r ->
+      match r with
+      | Ok () -> Logs.info (fun m -> m "Set 'sha512s'"); Lwt.return_unit
+      | Error e ->
+        Logs.warn (fun m -> m "Failed to write 'sha512s': %a" Cache.pp_write_error e);
+        Lwt.return_unit
+
+
     (* on disk, we use a flat file system where the filename is the sha256 of the data *)
     (* on startup, we read + validate all data, and also store in the overlays (md5/sha512) the pointers *)
     (* the read can be md5/sha256/sha512 sum, and will output the data requested *)
     (* a write will compute the hashes and save the data (also validating potential other hashes) *)
-    let init dev =
+    let init dev dev_md5s dev_sha512s =
       KV.list dev Mirage_kv.Key.empty >>= function
       | Error e -> Logs.err (fun m -> m "error %a listing kv" KV.pp_error e); assert false
       | Ok entries ->
-        let t = empty dev in
+        let t = empty dev dev_md5s dev_sha512s in
+        Cache.read t.dev_md5s >>= fun r ->
+        (match r with
+         | Ok Some s -> Result.iter (fun md5s -> t.md5s <- md5s) (unmarshal_sm s)
+         | Ok None -> Logs.debug (fun m -> m "No md5s cached")
+         | Error e -> Logs.debug (fun m -> m "Error reading md5s cache: %a" Cache.pp_error e));
+        Cache.read t.dev_sha512s >>= fun r ->
+        (match r with
+         | Ok Some s -> Result.iter (fun sha512s -> t.sha512s <- sha512s) (unmarshal_sm s)
+         | Ok None -> Logs.debug (fun m -> m "No sha512s cached")
+         | Error e -> Logs.debug (fun m -> m "Error reading sha512s cache: %a" Cache.pp_error e));
+        let md5s = SSet.of_list (List.map snd (SM.bindings t.md5s))
+        and sha512s = SSet.of_list (List.map snd (SM.bindings t.sha512s)) in
         Lwt_list.iteri_s (fun idx (name, typ) ->
             if idx mod 10 = 0 then Gc.full_major () ;
             match typ with
@@ -229,14 +269,17 @@ module Make
                 let cs = Cstruct.of_string data in
                 let digest = Mirage_crypto.Hash.digest `SHA256 cs in
                 if String.equal name (key t digest) then begin
-                  let md5 = Mirage_crypto.Hash.digest `MD5 cs |> key t
-                  and sha512 = Mirage_crypto.Hash.digest `SHA512 cs |> key t
-                  in
-                  let md5s = SM.add md5 name t.md5s
-                  and sha512s = SM.add sha512 name t.sha512s
-                  in
-                  t.md5s <- md5s ; t.sha512s <- sha512s;
-                  Logs.info (fun m -> m "added %s" name);
+                  if not (SSet.mem name md5s) then begin
+                    let md5 = Mirage_crypto.Hash.digest `MD5 cs |> key t in
+                    let md5s = SM.add md5 name t.md5s in
+                    t.md5s <- md5s
+                  end;
+                  if not (SSet.mem name sha512s) then begin
+                    let sha512 = Mirage_crypto.Hash.digest `SHA512 cs |> key t in
+                    let sha512s = SM.add sha512 name t.sha512s in
+                    t.sha512s <- sha512s
+                  end;
+                  Logs.debug (fun m -> m "added %s" name);
                   Lwt.return_unit
                 end else begin
                   Logs.err (fun m -> m "corrupt data, expected %s, read %s (should remove)"
@@ -498,7 +541,7 @@ stamp: %S
           let resp = Httpaf.Response.create `Not_modified in
           respond_with_empty reqd resp
         else *)
-    let dispatch t store hook_url git_kv update _flow _conn reqd =
+    let dispatch t store hook_url _git_kv update _flow _conn reqd =
       let request = Httpaf.Reqd.request reqd in
       Logs.info (fun f -> f "requested %s" request.Httpaf.Request.target);
       match String.split_on_char '/' request.Httpaf.Request.target with
@@ -627,15 +670,22 @@ stamp: %S
               Lwt.return_unit
             end
           | _ -> Lwt.return_unit)
-      (SM.bindings urls) >|= fun () ->
+      (SM.bindings urls) >>= fun () ->
+    Disk.update_caches disk >|= fun () ->
     Logs.info (fun m -> m "downloading of %d urls done" (SM.cardinal urls))
 
   module Paf = Paf_mirage.Make(Time)(Stack.TCP)
 
   let start block _time _pclock stack git_ctx http_ctx =
-    KV.connect block >>= fun kv ->
+    BLOCK.get_info block >>= fun info ->
+    let sectors_cache = Key_gen.sectors_cache () in
+    Part.connect Int64.(sub info.size_sectors (mul 2L sectors_cache)) block >>= fun (b1, rest) ->
+    let b2, b3 = Part.subpartition sectors_cache rest in
+    KV.connect b1 >>= fun kv ->
+    Cache.connect b2 >>= fun md5s ->
+    Cache.connect b3 >>= fun sha512s ->
     Logs.info (fun m -> m "Available bytes in tar storage: %Ld" (KV.free kv));
-    Disk.init kv >>= fun disk ->
+    Disk.init kv md5s sha512s >>= fun disk ->
     if Key_gen.check () then Lwt.return_unit
     else
       Git_kv.connect git_ctx (Key_gen.remote ()) >>= fun git_kv ->
