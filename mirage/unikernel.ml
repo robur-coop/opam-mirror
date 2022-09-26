@@ -12,17 +12,12 @@ module Make
 
   module KV = Tar_mirage.Make_KV_RW(BLOCK)
 
-  module Store = Irmin_mirage_git.Mem.KV.Make(Irmin.Contents.String)
-  module Sync = Irmin.Sync.Make(Store)
-
   module SM = Map.Make(String)
 
   module HM = Map.Make(struct
       type t = Mirage_crypto.Hash.hash
       let compare = compare (* TODO remove polymorphic compare *)
     end)
-
-  module Git_commit = Git.Commit.Make(Store.Git.Hash)
 
   let hash_to_string = function
     | `MD5 -> "md5"
@@ -53,48 +48,28 @@ module Make
       hm ""
 
   module Git = struct
-    let decompose_git_url () =
-      match String.split_on_char '#' (Key_gen.remote ()) with
-      | [ url ] -> url, None
-      | [ url ; branch ] -> url, Some branch
-      | _ ->
-        Logs.err (fun m -> m "expected at most a single # in remote");
-        exit argument_error
-
-    let connect ctx =
-      let uri, branch = decompose_git_url () in
-      let config = Irmin_mem.config () in
-      Store.Repo.v config >>= fun r ->
-      (match branch with
-       | None -> Store.main r
-       | Some branch -> Store.of_branch r branch) >|= fun repo ->
-      Logs.info (fun m -> m "connected to %s (branch %s)"
-                    uri (Option.value ~default:"main" branch));
-      repo, Store.remote ~ctx uri
-
-    let pull store upstream =
-      Logs.info (fun m -> m "pulling from remote!");
-      Sync.pull ~depth:1 store upstream `Set >|= fun r ->
-      match r with
-      | Ok (`Head c as s) -> Ok (c, Fmt.str "pulled %a" Sync.pp_status s)
-      | Ok `Empty -> Error (`Msg "pulled empty repository")
-      | Error (`Msg e) -> Error (`Msg ("pull error " ^ e))
-      | Error (`Conflict msg) -> Error (`Msg ("pull conflict " ^ msg))
-
     let find_contents store =
       let rec go store path acc =
-        Store.list store path >>= fun steps ->
-        Lwt_list.fold_left_s (fun acc (step, _) ->
-            let full_path = path @ [ step ] in
-            let str = String.concat "/" full_path in
-            Store.kind store full_path >>= function
-            | None ->
-              Logs.warn (fun m -> m "no kind for %s" str);
-              Lwt.return acc
-            | Some `Contents -> Lwt.return (full_path :: acc)
-            | Some `Node -> go store full_path acc) acc steps
+        Git_kv.list store path >>= function
+        | Error e ->
+          Logs.err (fun m -> m "error %a while listing %a"
+                       Git_kv.pp_error e Mirage_kv.Key.pp path);
+          Lwt.return acc
+        | Ok steps ->
+          Lwt_list.fold_left_s (fun acc (step, _) ->
+              let full_path = Mirage_kv.Key.add path step in
+              Git_kv.exists store full_path >>= function
+              | Error e ->
+                Logs.err (fun m -> m "error %a for exists %a" Git_kv.pp_error e
+                             Mirage_kv.Key.pp full_path);
+                Lwt.return acc
+              | Ok None ->
+                Logs.warn (fun m -> m "no typ for %a" Mirage_kv.Key.pp full_path);
+                Lwt.return acc
+              | Ok Some `Value -> Lwt.return (full_path :: acc)
+              | Ok Some `Dictionary -> go store full_path acc) acc steps
       in
-      go store [] []
+      go store Mirage_kv.Key.empty []
 
     let decode_digest filename str =
       let hex h s =
@@ -187,16 +162,14 @@ module Make
     let find_urls store =
       find_contents store >>= fun paths ->
       let opam_paths =
-        List.filter (fun p -> match List.rev p with
-            | "opam" :: _ -> true | _ -> false)
-          paths
+        List.filter (fun p -> Mirage_kv.Key.basename p = "opam") paths
       in
       Lwt_list.fold_left_s (fun acc path ->
-          Store.find store path >|= function
-          | Some data ->
+          Git_kv.get store path >|= function
+          | Ok data ->
             (* TODO report parser errors *)
             (try
-               let url_csums = extract_urls (String.concat "/" path) data in
+               let url_csums = extract_urls (Mirage_kv.Key.to_string path) data in
                Option.fold ~none:acc ~some:(fun (url, csums) ->
                    if HM.cardinal csums = 0 then
                      (Logs.warn (fun m -> m "no checksums for %s, ignoring" url); acc)
@@ -216,9 +189,9 @@ module Make
                              None
                            end) acc) url_csums
              with _ ->
-               Logs.warn (fun m -> m "some error in %s, ignoring" (String.concat "/" path));
+               Logs.warn (fun m -> m "some error in %a, ignoring" Mirage_kv.Key.pp path);
                acc)
-          | None -> acc)
+          | Error e -> Logs.warn (fun m -> m "Git_kv.get: %a" Git_kv.pp_error e); acc)
         SM.empty opam_paths
   end
 
@@ -231,7 +204,7 @@ module Make
 
     let empty dev = { md5s = SM.empty ; sha512s = SM.empty ; dev }
 
-    let key t d =
+    let key _t d =
       let d = Cstruct.to_string d in
       hex_to_string d
 
@@ -399,10 +372,10 @@ module Make
       in
       Git.find_contents store >>= fun paths ->
       Lwt_list.iter_s (fun path ->
-          Store.find store path >|= function
-          | Some data ->
+          Git_kv.get store path >|= function
+          | Ok data ->
             let data =
-              if path = [ "repo" ] then repo else data
+              if Mirage_kv.Key.(equal path (v "repo")) then repo else data
             in
             let file_mode = 0o644 (* would be great to retrieve the actual one - but not needed (since opam-repository doesn't use it anyways)! *)
             and mod_time = Int64.of_int mtime
@@ -412,12 +385,12 @@ module Make
             in
             let hdr =
               Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
-                (String.concat "/" path) (Int64.of_int size)
+                (Mirage_kv.Key.to_string path) (Int64.of_int size)
             in
             let o = ref false in
             let stream () = if !o then None else (o := true; Some data) in
             Tar_Gz.write_block ~level:Tar.Header.Ustar hdr gz_out stream
-          | None -> ())
+          | Error e -> Logs.warn (fun m -> m "Git_kv error: %a" Git_kv.pp_error e))
         paths >|= fun () ->
       Tar_Gz.write_end gz_out;
       Buffer.contents out_channel
@@ -436,8 +409,9 @@ module Make
     let m' = Array.get month (pred m) in
     Printf.sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT" weekday d m' y hh mm ss
 
-    let commit_id commit =
-      Fmt.to_to_string (Irmin.Type.pp Store.Hash.t) (Store.Commit.hash commit)
+    let commit_id git_kv =
+      Git_kv.digest git_kv Mirage_kv.Key.empty >|= fun r ->
+      Result.get_ok r
 
     let repo commit =
       let upstream = List.hd (String.split_on_char '#' (Key_gen.remote ())) in
@@ -448,13 +422,10 @@ archive-mirrors: "cache"
 stamp: %S
 |} upstream commit commit
 
-    let modified commit =
-      let info = Store.Commit.info commit in
-      let ptime =
-        Option.value ~default:(Ptime.v (Pclock.now_d_ps ()))
-          (Ptime.of_float_s (Int64.to_float (Store.Info.date info)))
-      in
-      ptime_to_http_date ptime
+    let modified git_kv =
+      Git_kv.last_modified git_kv Mirage_kv.Key.empty >|= fun r ->
+      let v = Result.fold ~ok:Fun.id ~error:(fun _ -> Pclock.now_d_ps ()) r in
+      ptime_to_http_date (Ptime.v v)
 
     type t = {
       mutable commit_id : string ;
@@ -463,35 +434,32 @@ stamp: %S
       mutable index : string ;
     }
 
-    let create commit store =
-      let commit_id = commit_id commit
-      and modified = modified commit
-      in
+    let create git_kv =
+      commit_id git_kv >>= fun commit_id ->
+      modified git_kv >>= fun modified ->
       let repo = repo commit_id in
-      Tarball.of_git repo store >|= fun index ->
+      Tarball.of_git repo git_kv >|= fun index ->
       { commit_id ; modified ; repo ; index }
 
     let update_lock = Lwt_mutex.create ()
 
-    let update_git t git_ctx =
+    let update_git t git_kv =
       Lwt_mutex.with_lock update_lock (fun () ->
-          Git.connect git_ctx >>= fun (store, upstream) ->
-          Git.pull store upstream >>= function
+          Git_kv.pull git_kv >>= function
           | Error `Msg msg ->
             Logs.err (fun m -> m "error %s while updating git" msg);
             Lwt.return None
-          | Ok (commit, msg) ->
-            Logs.info (fun m -> m "git: %s" msg);
-            let commit_id = commit_id commit
-            and modified = modified commit
-            in
+          | Ok changes ->
+            commit_id git_kv >>= fun commit_id ->
+            modified git_kv >>= fun modified ->
+            Logs.info (fun m -> m "git: %s" commit_id);
             let repo = repo commit_id in
-            Tarball.of_git repo store >|= fun index ->
+            Tarball.of_git repo git_kv >|= fun index ->
             t.commit_id <- commit_id ;
             t.modified <- modified ;
             t.repo <- repo ;
             t.index <- index;
-            Some store)
+            Some changes)
 
     let not_modified request (modified, etag) =
       match Httpaf.Headers.get request.Httpaf.Request.headers "if-modified-since" with
@@ -528,13 +496,13 @@ stamp: %S
           let resp = Httpaf.Response.create `Not_modified in
           respond_with_empty reqd resp
         else *)
-    let dispatch t store hook_url git_ctx update _flow _conn reqd =
+    let dispatch t store hook_url git_kv update _flow _conn reqd =
       let request = Httpaf.Reqd.request reqd in
       Logs.info (fun f -> f "requested %s" request.Httpaf.Request.target);
       match String.split_on_char '/' request.Httpaf.Request.target with
       | [ ""; x ] when String.equal x hook_url ->
         Lwt.async (fun () ->
-            update_git t git_ctx >>= function
+            update_git t git_kv >>= function
             | None -> Lwt.return_unit
             | Some store -> update store);
         let data = "Update in progress" in
@@ -667,24 +635,23 @@ stamp: %S
 
   let start block _time _pclock stack git_ctx http_ctx =
     KV.connect block >>= fun kv ->
+    Logs.info (fun m -> m "Available bytes in tar storage: %Ld" (KV.free kv));
     Disk.init kv >>= fun disk ->
     if Key_gen.check () then Lwt.return_unit
     else
-      Git.connect git_ctx >>= fun (store, upstream) ->
-      Git.pull store upstream >>= function
-      | Error `Msg msg -> Lwt.fail_with msg
-      | Ok (commit, msg) ->
-        Logs.info (fun m -> m "git: %s" msg);
-        Serve.create commit store >>= fun serve ->
-        Paf.init ~port:(Key_gen.port ()) (Stack.tcp stack) >>= fun t ->
-        let update store = download_archives disk http_ctx store in
-        let service =
-          Paf.http_service
-            ~error_handler:(fun _ ?request:_ _ _ -> ())
-            (Serve.dispatch serve disk (Key_gen.hook_url ()) git_ctx update)
-        in
-        let `Initialized th = Paf.serve service t in
-        Logs.info (fun f -> f "listening on %d/HTTP" (Key_gen.port ()));
-        download_archives disk http_ctx store >>= fun () ->
-        (th >|= fun _v -> ())
+      Git_kv.connect git_ctx (Key_gen.remote ()) >>= fun git_kv ->
+      Serve.commit_id git_kv >>= fun commit_id ->
+      Logs.info (fun m -> m "git: %s" commit_id);
+      Serve.create git_kv >>= fun serve ->
+      Paf.init ~port:(Key_gen.port ()) (Stack.tcp stack) >>= fun t ->
+      let update _changes = download_archives disk http_ctx git_kv in
+      let service =
+        Paf.http_service
+          ~error_handler:(fun _ ?request:_ _ _ -> ())
+          (Serve.dispatch serve disk (Key_gen.hook_url ()) git_kv update)
+      in
+      let `Initialized th = Paf.serve service t in
+      Logs.info (fun f -> f "listening on %d/HTTP" (Key_gen.port ()));
+      download_archives disk http_ctx git_kv >>= fun () ->
+      (th >|= fun _v -> ())
 end

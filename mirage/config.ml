@@ -53,7 +53,7 @@ let mirror =
       package ~min:"0.1.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
       package "httpaf" ;
-      package ~min:"3.0.0" "irmin-mirage-git" ;
+      package ~pin:"git+https://git.robur.io/robur/git-kv.git#main" "git-kv" ;
       package ~min:"3.7.0" "git-paf" ;
       package "opam-file-format" ;
       package ~min:"2.1.0" ~sublibs:[ "gz" ] "tar" ;
