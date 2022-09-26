@@ -445,11 +445,13 @@ stamp: %S
 
     let update_git t git_kv =
       Lwt_mutex.with_lock update_lock (fun () ->
+          Logs.info (fun m -> m "pulling the git repository");
           Git_kv.pull git_kv >>= function
           | Error `Msg msg ->
             Logs.err (fun m -> m "error %s while updating git" msg);
             Lwt.return None
           | Ok [] ->
+            Logs.info (fun m -> m "git changes are empty");
             Lwt.return (Some [])
           | Ok changes ->
             commit_id git_kv >>= fun commit_id ->
@@ -645,8 +647,7 @@ stamp: %S
       Paf.init ~port:(Key_gen.port ()) (Stack.tcp stack) >>= fun t ->
       let update () =
         Serve.update_git serve git_kv >>= function
-        | None -> Lwt.return_unit
-        | Some [] -> Lwt.return_unit
+        | None | Some [] -> Lwt.return_unit
         | Some _changes -> download_archives disk http_ctx git_kv
       in
       let service =
