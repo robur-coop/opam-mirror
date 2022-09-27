@@ -66,7 +66,7 @@ let mirror =
       package ~min:"3.7.0" "git-paf" ;
       package "opam-file-format" ;
       package ~min:"2.1.0" ~sublibs:[ "gz" ] "tar" ;
-      package ~pin:"git+https://github.com/hannesm/ocaml-tar.git#kv-rw" "tar-mirage" ;
+      package ~pin:"git+https://github.com/hannesm/ocaml-tar.git#kv-rw-kv-5" "tar-mirage" ;
       package ~pin:"git+https://github.com/reynir/mirage-block-partition.git" "mirage-block-partition" ;
       package ~pin:"git+https://git.robur.io/reynir/oneffs.git" "oneffs" ;
     ]
