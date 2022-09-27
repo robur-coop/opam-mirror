@@ -397,7 +397,9 @@ module Make
           let rec read_more offset =
             if offset < len then
               KV.get_partial t.dev key ~offset ~length:chunk_size >>= function
-              | Ok data -> f data ; read_more (offset + chunk_size)
+              | Ok data ->
+                f data >>= fun () ->
+                read_more (offset + chunk_size)
               | Error e ->
                 Logs.err (fun m -> m "error %a while reading %s %s"
                              KV.pp_error e (hash_to_string h) v);
@@ -682,7 +684,11 @@ stamp: %S
                     let resp = Httpaf.Response.create ~headers `OK in
                     let body = Httpaf.Reqd.respond_with_streaming reqd resp in
                     Disk.read_chunked store h hash (fun chunk ->
-                        Httpaf.Body.write_string body chunk) >|= fun _ ->
+                        let wait, wakeup = Lwt.task () in
+                        Httpaf.Body.write_string body chunk;
+                        Httpaf.Body.flush body (Lwt.wakeup wakeup);
+                        wait
+                      ) >|= fun _ ->
                     Httpaf.Body.close_writer body)
         end
       | _ ->
