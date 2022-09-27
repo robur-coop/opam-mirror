@@ -55,9 +55,16 @@ let sectors_cache =
   let doc = Key.Arg.info ~doc ["sectors-cache"] in
   Key.(create "sectors-cache" Arg.(opt int64 Int64.(mul 4L 2048L) doc))
 
+let sectors_git =
+  let doc = "Number of sectors reserved for git dump." in
+  let doc = Key.Arg.info ~doc ["sectors-git"] in
+  Key.(create "sectors-git" Arg.(opt int64 Int64.(mul 40L (mul 2L 1024L)) doc))
+
 let mirror =
   foreign "Unikernel.Make"
-    ~keys:[ Key.v check ; Key.v verify ; Key.v remote ; Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ; Key.v port ; Key.v sectors_cache ]
+    ~keys:[ Key.v check ; Key.v verify ; Key.v remote ;
+            Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ;
+            Key.v port ; Key.v sectors_cache ; Key.v sectors_git ; ]
     ~packages:[
       package ~min:"0.1.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;

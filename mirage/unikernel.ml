@@ -276,7 +276,6 @@ module Make
 
     (* on disk, we use a flat file system where the filename is the sha256 of the data *)
     let init ~verify dev dev_md5s dev_sha512s =
-      Logs.info (fun m -> m "init with verify %B" verify);
       KV.list dev Mirage_kv.Key.empty >>= function
       | Error e -> Logs.err (fun m -> m "error %a listing kv" KV.pp_error e); assert false
       | Ok entries ->
@@ -716,13 +715,11 @@ stamp: %S
 
   end
 
+  let bad_archives = SSet.of_list Bad.archives
+
   let download_archives disk http_ctx store =
     Git.find_urls store >>= fun urls ->
-    let urls = SM.filter (fun k _ ->
-        not (String.equal
-               "https://github.com/Opsian/opsian-ocaml/releases/download/0.1/0.1.tar.gz"
-               k)) urls
-    in
+    let urls = SM.filter (fun k _ -> not (SSet.mem k bad_archives)) urls in
     let pool = Lwt_pool.create (Key_gen.parallel_downloads ()) (Fun.const Lwt.return_unit) in
     let idx = ref 0 in
     Lwt_list.iter_p (fun (url, csums) ->
@@ -757,22 +754,57 @@ stamp: %S
     Disk.update_caches disk >|= fun () ->
     Logs.info (fun m -> m "downloading of %d urls done" (SM.cardinal urls))
 
+  let dump_git git_dump git_kv =
+    Git_kv.to_octets git_kv >>= fun data ->
+    Cache.write git_dump data >|= function
+    | Ok () ->
+      Logs.info (fun m -> m "dumped git %d bytes" (String.length data))
+    | Error e ->
+      Logs.warn (fun m -> m "failed to dump git: %a" Cache.pp_write_error e)
+
+  let restore_git git_dump git_ctx =
+    Cache.read git_dump >>= function
+    | Ok None -> Lwt.return (Error ())
+    | Error e ->
+      Logs.warn (fun m -> m "failed to read git state: %a" Cache.pp_error e);
+      Lwt.return (Error ())
+    | Ok Some data ->
+      Git_kv.of_octets git_ctx ~remote:(Key_gen.remote ()) data >|= function
+      | Ok git_kv -> Ok git_kv
+      | Error `Msg msg ->
+        Logs.err (fun m -> m "error restoring git state: %s" msg);
+        Error ()
+
   module Paf = Paf_mirage.Make(Time)(Stack.TCP)
 
   let start block _time _pclock stack git_ctx http_ctx =
     BLOCK.get_info block >>= fun info ->
     let sectors_cache = Key_gen.sectors_cache () in
-    Part.connect Int64.(sub info.size_sectors (mul 2L sectors_cache)) block >>= fun (b1, rest) ->
+    let sectors_git = Key_gen.sectors_git () in
+    let git_start =
+      let cache_size = Int64.(mul 2L sectors_cache) in
+      Int64.(sub info.size_sectors (add cache_size sectors_git))
+    in
+    Part.connect git_start block >>= fun (b1, rest) ->
+    let git_dump, rest = Part.subpartition sectors_git rest in
     let b2, b3 = Part.subpartition sectors_cache rest in
     KV.connect b1 >>= fun kv ->
     Cache.connect b2 >>= fun md5s ->
     Cache.connect b3 >>= fun sha512s ->
+    Cache.connect git_dump >>= fun git_dump ->
     Logs.info (fun m -> m "Available bytes in tar storage: %Ld" (KV.free kv));
     Disk.init ~verify:(Key_gen.verify ()) kv md5s sha512s >>= fun disk ->
     if Key_gen.check () then
       Lwt.return_unit
     else
-      Git_kv.connect git_ctx (Key_gen.remote ()) >>= fun git_kv ->
+      begin
+        restore_git git_dump git_ctx >>= function
+        | Ok git_kv -> Lwt.return git_kv
+        | Error () ->
+          Git_kv.connect git_ctx (Key_gen.remote ()) >>= fun git_kv ->
+          dump_git git_dump git_kv >|= fun () ->
+          git_kv
+      end >>= fun git_kv ->
       Serve.commit_id git_kv >>= fun commit_id ->
       Logs.info (fun m -> m "git: %s" commit_id);
       Serve.create git_kv >>= fun serve ->
@@ -780,7 +812,9 @@ stamp: %S
       let update () =
         Serve.update_git serve git_kv >>= function
         | None | Some [] -> Lwt.return_unit
-        | Some _changes -> download_archives disk http_ctx git_kv
+        | Some _changes ->
+          dump_git git_dump git_kv >>= fun () ->
+          download_archives disk http_ctx git_kv
       in
       let service =
         Paf.http_service
