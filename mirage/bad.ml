@@ -133,6 +133,7 @@ let archives =
     "https://zoggy.github.io/stog/stog-0.13.0.tar.gz" ;
     "https://zoggy.github.io/ocaml-taglog/taglog-0.3.0.tar.gz" ;
     "https://zoggy.github.io/ocf/ocf-0.1.0.tar.gz" ;
+    "https://opam.ocaml.org/cache/md5/24/24b163eb77e6832747dccd6cc8a5d57c" ;
   ]
 
   and forbidden = [
@@ -180,6 +181,14 @@ let archives =
   and five_o_three = [ "https://gitlab.com/gasche/build_path_prefix_map/repository/0.2/archive.tar.gz" ]
 
   and is_ftp = [ "ftp://ftp.netbsd.org/pub/pkgsrc/distfiles/wyrd-1.4.6.tar.gz" ]
+
+  and connect_fails = [
+    "http://godi.0ok.org/godi-backup/shcaml-0.1.3.tar.gz" ;
+    "http://www.first.in-berlin.de/software/tools/apalogretrieve/apalogretrieve-0-9-6_4.tgz" ;
+    "https://cavale.enseeiht.fr/osdp/osdp-0.5.4.tgz" ;
+    "https://cavale.enseeiht.fr/osdp/osdp-0.6.0.tgz" ;
+    "https://cavale.enseeiht.fr/osdp/osdp-1.0.0.tgz" ;
+  ]
   in
 
-  too_big @ hash_mismatch @ bad_request @ not_found @ forbidden @ three_o_o @ five_o_three @ is_ftp
+  too_big @ hash_mismatch @ bad_request @ not_found @ forbidden @ three_o_o @ five_o_three @ is_ftp @ connect_fails
