@@ -785,12 +785,12 @@ stamp: %S
       let cache_size = Int64.(mul 2L sectors_cache) in
       Int64.(sub info.size_sectors (add cache_size sectors_git))
     in
-    Part.connect git_start block >>= fun (b1, rest) ->
+    Part.connect git_start block >>= fun (kv, rest) ->
     let git_dump, rest = Part.subpartition sectors_git rest in
-    let b2, b3 = Part.subpartition sectors_cache rest in
-    KV.connect b1 >>= fun kv ->
-    Cache.connect b2 >>= fun md5s ->
-    Cache.connect b3 >>= fun sha512s ->
+    let md5s, sha512s = Part.subpartition sectors_cache rest in
+    KV.connect kv >>= fun kv ->
+    Cache.connect md5s >>= fun md5s ->
+    Cache.connect sha512s >>= fun sha512s ->
     Cache.connect git_dump >>= fun git_dump ->
     Logs.info (fun m -> m "Available bytes in tar storage: %Ld" (KV.free kv));
     Disk.init ~verify:(Key_gen.verify ()) kv md5s sha512s >>= fun disk ->
