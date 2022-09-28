@@ -121,7 +121,6 @@ let archives =
     "https://github.com/jrochel/eliom/archive/6.4.0.tar.gz" ;
     "https://github.com/drjdn/ocaml_lua_parser/archive/1.0.1.tar.gz" ;
     "https://github.com/sagotch/To.ml/archive/v1.0.0.tar.gz" ;
-    "https://github.com/roburio/ocaml-solo5-elftool/releases/download/v0.1.0/solo5-elftool-0.1.0.tbz" ;
     "https://zoggy.github.io/ocaml-rdf/ocaml-rdf-0.9.0.tar.gz" ;
     "https://github.com/sagotch/To.ml/archive/v2.1.0.tar.gz" ;
     "https://github.com/sagotch/To.ml/archive/v2.0.0.tar.gz" ;
