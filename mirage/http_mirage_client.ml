@@ -1,7 +1,6 @@
 let http_scheme = Mimic.make ~name:"http-scheme"
 let http_port = Mimic.make ~name:"http-port"
 let http_hostname = Mimic.make ~name:"http-hostname"
-let http_sleep = Mimic.make ~name:"http-sleep"
 let tls_config = Mimic.make ~name:"tls-config"
 
 open Lwt.Infix
@@ -73,12 +72,11 @@ module Make
       Mimic.Fun.[ req Happy_eyeballs.happy_eyeballs
                 ; req http_scheme; req http_hostname; dft http_port 80 ]
       ~k:k0 ctx in
-    let ctx = Mimic.fold tls_edn
-      Mimic.Fun.[ req Happy_eyeballs.happy_eyeballs
-                ; req http_scheme; req http_hostname; dft http_port 443
-                ; req tls_config ]
-      ~k:k1 ctx in
-    Lwt.return (Mimic.add http_sleep Time.sleep_ns ctx)
+    Lwt.return (Mimic.fold tls_edn
+                  Mimic.Fun.[ req Happy_eyeballs.happy_eyeballs
+                            ; req http_scheme; req http_hostname; dft http_port 443
+                            ; req tls_config ]
+                  ~k:k1 ctx)
 
   let alpn_protocol flow =
     let module M = (val (Mimic.repr tls_protocol)) in
@@ -128,7 +126,7 @@ let prepare_http_1_1_headers headers host user_pass body_length =
     | Some v -> add headers "content-length" (string_of_int v) in
   add_authentication ~add headers user_pass
 
-let single_http_1_1_request ~sleep ?config flow user_pass host meth path headers body =
+let single_http_1_1_request ?config flow user_pass host meth path headers body =
   let body_length = Option.map String.length body in
   let headers = prepare_http_1_1_headers headers host user_pass body_length in
   let req = Httpaf.Request.create ~headers meth path in
@@ -163,7 +161,7 @@ let single_http_1_1_request ~sleep ?config flow user_pass host meth path headers
     wakeup err in
   let request_body, conn = Httpaf.Client_connection.request ?config req ~error_handler
     ~response_handler in
-  Lwt.async (fun () -> Paf.run (module HTTP_1_1) ~sleep conn flow) ;
+  Lwt.async (fun () -> Paf.run (module HTTP_1_1) conn flow) ;
   Option.iter (Httpaf.Body.write_string request_body) body ;
   Httpaf.Body.close_writer request_body ;
   finished
@@ -175,7 +173,7 @@ let prepare_h2_headers headers host user_pass body_length =
   let headers = add headers "content-length" (string_of_int (Option.value ~default:0 body_length)) in
   add_authentication ~add headers user_pass
 
-let single_h2_request ~sleep ?config ~scheme flow user_pass host meth path headers body =
+let single_h2_request ?config ~scheme flow user_pass host meth path headers body =
   let body_length = Option.map String.length body in
   let headers = prepare_h2_headers headers host user_pass body_length in
   let req = H2.Request.create ~scheme ~headers meth path in
@@ -216,7 +214,7 @@ let single_h2_request ~sleep ?config ~scheme flow user_pass host meth path heade
   let conn = H2.Client_connection.create ?config ?push_handler:None
     ~error_handler in
   let request_body = H2.Client_connection.request conn req ~error_handler ~response_handler in
-  Lwt.async (fun () -> Paf.run (module H2.Client_connection) ~sleep conn flow) ;
+  Lwt.async (fun () -> Paf.run (module H2.Client_connection) conn flow) ;
   Option.iter (H2.Body.Writer.write_string request_body) body ;
   H2.Body.Writer.close request_body ;
   finished >|= fun v ->
@@ -261,7 +259,6 @@ let alpn_protocol_of_string = function
   | _ -> None
 
 let single_request ~ctx ~alpn_protocol ?config cfg ~meth ~headers ?body uri =
-  let sleep = Option.get (Mimic.get http_sleep ctx) in
   Lwt.return (decode_uri ~ctx uri) >>? fun (ctx, scheme, host, user_pass, path) ->
   let ctx = match Lazy.force cfg with
     | Ok (`Custom cfg) -> Mimic.add tls_config cfg ctx
@@ -273,17 +270,17 @@ let single_request ~ctx ~alpn_protocol ?config cfg ~meth ~headers ?body uri =
   Mimic.resolve ctx >>? fun flow ->
   (match Option.bind (alpn_protocol flow) alpn_protocol_of_string, config with
    | (Some `HTTP_1_1 | None), Some (`HTTP_1_1 config) ->
-     single_http_1_1_request ~sleep ~config flow user_pass host meth path headers body
+     single_http_1_1_request ~config flow user_pass host meth path headers body
    | (Some `HTTP_1_1 | None), None ->
-     single_http_1_1_request ~sleep flow user_pass host meth path headers body
+     single_http_1_1_request flow user_pass host meth path headers body
    | (Some `H2 | None), Some (`H2 config) ->
-     single_h2_request ~sleep ~config ~scheme flow user_pass host meth path headers body
+     single_h2_request ~config ~scheme flow user_pass host meth path headers body
    | Some `H2, None ->
-     single_h2_request ~sleep ~scheme flow user_pass host meth path headers body
+     single_h2_request ~scheme flow user_pass host meth path headers body
    | Some `H2, (Some (`HTTP_1_1 _)) ->
-     single_h2_request ~sleep ~scheme flow user_pass host meth path headers body
+     single_h2_request ~scheme flow user_pass host meth path headers body
    | Some `HTTP_1_1, Some (`H2 _) ->
-     single_http_1_1_request ~sleep flow user_pass host meth path headers body) >>= fun r ->
+     single_http_1_1_request flow user_pass host meth path headers body) >>= fun r ->
   Mimic.close flow >|= fun () ->
   r
 
