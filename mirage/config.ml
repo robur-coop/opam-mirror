@@ -60,11 +60,18 @@ let sectors_git =
   let doc = Key.Arg.info ~doc ["sectors-git"] in
   Key.(create "sectors-git" Arg.(opt int64 Int64.(mul 40L (mul 2L 1024L)) doc))
 
+let ignore_local_git =
+  let doc = "Ignore restoring locally saved git repository." in
+  let doc = Key.Arg.info ~doc ["ignore-local-git"] in
+  Key.(create "ignore-local-git" Arg.(flag doc))
+
 let mirror =
   foreign "Unikernel.Make"
     ~keys:[ Key.v check ; Key.v verify ; Key.v remote ;
             Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ;
-            Key.v port ; Key.v sectors_cache ; Key.v sectors_git ; ]
+            Key.v port ; Key.v sectors_cache ; Key.v sectors_git ;
+            Key.v ignore_local_git ;
+          ]
     ~packages:[
       package ~min:"0.3.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;

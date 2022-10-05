@@ -796,7 +796,10 @@ stamp: %S
       Lwt.return_unit
     else
       begin
-        restore_git git_dump git_ctx >>= function
+        (if Key_gen.ignore_local_git () then
+           Lwt.return (Error ())
+         else
+           restore_git git_dump git_ctx) >>= function
         | Ok git_kv -> Lwt.return git_kv
         | Error () ->
           Git_kv.connect git_ctx (Key_gen.remote ()) >>= fun git_kv ->
