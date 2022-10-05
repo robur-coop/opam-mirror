@@ -775,7 +775,7 @@ stamp: %S
         Logs.err (fun m -> m "error restoring git state: %s" msg);
         Error ()
 
-  module Paf = Paf_mirage.Make(Time)(Stack.TCP)
+  module Paf = Paf_mirage.Make(Stack.TCP)
 
   let start block _time _pclock stack git_ctx http_ctx =
     BLOCK.get_info block >>= fun info ->
