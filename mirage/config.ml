@@ -66,7 +66,7 @@ let mirror =
             Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ;
             Key.v port ; Key.v sectors_cache ; Key.v sectors_git ; ]
     ~packages:[
-      package ~min:"0.1.0" ~sublibs:[ "mirage" ] "paf" ;
+      package ~min:"0.2.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
       package "httpaf" ;
       package ~pin:"git+https://git.robur.io/robur/git-kv.git#main" "git-kv" ;
