@@ -18,11 +18,10 @@ let verify =
 let remote =
   let doc =
     Key.Arg.info
-      ~doc:"Remote repository url, use suffix #foo to specify a branch 'foo': \
-            https://github.com/ocaml/opam-repository.git"
+      ~doc:"Remote repository url"
       ["remote"]
   in
-  Key.(create "remote" Arg.(opt string "https://github.com/ocaml/opam-repository.git#master" doc))
+  Key.(create "remote" Arg.(opt string "https://opam.ocaml.org" doc))
 
 let parallel_downloads =
   let doc =
@@ -35,7 +34,7 @@ let parallel_downloads =
 let hook_url =
   let doc =
     Key.Arg.info
-      ~doc:"URL to conduct an update of the git repository" ["hook-url"]
+      ~doc:"URL to conduct an update of the opam repository" ["hook-url"]
   in
   Key.(create "hook-url" Arg.(opt string "update" doc))
 
@@ -55,29 +54,23 @@ let sectors_cache =
   let doc = Key.Arg.info ~doc ["sectors-cache"] in
   Key.(create "sectors-cache" Arg.(opt int64 Int64.(mul 4L 2048L) doc))
 
-let sectors_git =
-  let doc = "Number of sectors reserved for git dump." in
-  let doc = Key.Arg.info ~doc ["sectors-git"] in
-  Key.(create "sectors-git" Arg.(opt int64 Int64.(mul 40L (mul 2L 1024L)) doc))
-
 let mirror =
   foreign "Unikernel.Make"
     ~keys:[ Key.v check ; Key.v verify ; Key.v remote ;
             Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ;
-            Key.v port ; Key.v sectors_cache ; Key.v sectors_git ; ]
+            Key.v port ; Key.v sectors_cache ; ]
     ~packages:[
       package ~min:"0.2.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
       package "httpaf" ;
-      package ~pin:"git+https://git.robur.io/robur/git-kv.git#main" "git-kv" ;
-      package ~min:"3.7.0" "git-paf" ;
       package "opam-file-format" ;
-      package ~min:"2.1.0" ~sublibs:[ "gz" ] "tar" ;
+      package ~min:"2.1.0" ~sublibs:[ "gz" ] "tar" ~pin:"git+https://github.com/hannesm/ocaml-tar.git#kv-rw-kv-5" ;
       package ~pin:"git+https://github.com/hannesm/ocaml-tar.git#kv-rw-kv-5" "tar-mirage" ;
       package "mirage-block-partition" ;
       package "oneffs" ;
+      package "hex" ;
     ]
-    (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> http_client @-> job)
+    (block @-> time @-> pclock @-> stackv4v6 @-> http_client @-> job)
 
 let stack = generic_stackv4v6 default_network
 
@@ -98,10 +91,9 @@ let http_client =
    2 instances of happy-eyeballs will exists together which is not really good
    (it puts a pressure on the scheduler). *)
 
-let git_client, http_client =
-  let happy_eyeballs = git_happy_eyeballs stack dns (generic_happy_eyeballs stack dns) in
-  merge_git_clients (git_tcp tcp happy_eyeballs)
-    (git_http ~authenticator:tls_authenticator tcp happy_eyeballs),
+let http_client =
+  let happy_eyeballs = generic_happy_eyeballs stack dns in
+  let happy_eyeballs = git_happy_eyeballs stack dns happy_eyeballs in
   http_client $ default_time $ default_posix_clock $ tcp $ happy_eyeballs
 
 let program_block_size =
@@ -111,4 +103,4 @@ let program_block_size =
 let block = block_of_file "tar"
 
 let () = register "mirror"
-    [ mirror $ block $ default_time $ default_posix_clock $ stack $ git_client $ http_client ]
+    [ mirror $ block $ default_time $ default_posix_clock $ stack $ http_client ]
