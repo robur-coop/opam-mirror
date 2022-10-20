@@ -66,11 +66,11 @@ let mirror =
             Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ;
             Key.v port ; Key.v sectors_cache ; Key.v sectors_git ; ]
     ~packages:[
-      package ~min:"0.2.0" ~sublibs:[ "mirage" ] "paf" ;
+      package ~min:"0.3.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
       package "httpaf" ;
       package ~pin:"git+https://git.robur.io/robur/git-kv.git#main" "git-kv" ;
-      package ~min:"3.7.0" "git-paf" ;
+      package ~min:"3.10.0" "git-paf" ;
       package "opam-file-format" ;
       package ~min:"2.1.0" ~sublibs:[ "gz" ] "tar" ;
       package ~pin:"git+https://github.com/hannesm/ocaml-tar.git#kv-rw-kv-5" "tar-mirage" ;
@@ -86,11 +86,13 @@ let dns = generic_dns_client stack
 let tcp = tcpv4v6_of_stackv4v6 stack
 
 let http_client =
+  let packages =
+    [ package ~pin:"git+https://git.robur.io/robur/http-mirage-client.git#main" "http-mirage-client" ] in
   let connect _ modname = function
     | [ _time; _pclock; _tcpv4v6; ctx ] ->
       Fmt.str {ocaml|%s.connect %s|ocaml} modname ctx
     | _ -> assert false in
-  impl ~connect "Http_mirage_client.Make"
+  impl ~packages ~connect "Http_mirage_client.Make"
     (time @-> pclock @-> tcpv4v6 @-> git_client @-> http_client)
 (* XXX(dinosaure): [git_client] seems bad but it becames from a long discussion
    when a "mimic" device seems not accepted by everyone. We can copy [git_happy_eyeballs]
