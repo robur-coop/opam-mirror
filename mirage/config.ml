@@ -68,6 +68,7 @@ let mirror =
     ~packages:[
       package ~min:"0.3.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
+      package "hex" ;
       package "httpaf" ;
       package ~pin:"git+https://git.robur.io/robur/git-kv.git#main" "git-kv" ;
       package ~min:"3.10.0" "git-paf" ;
