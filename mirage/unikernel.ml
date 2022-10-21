@@ -11,9 +11,9 @@ module Make
   (HTTP : Http_mirage_client.S) = struct
 
   module Part = Mirage_block_partition.Make(BLOCK)
-  module KV = Tar_mirage.Make_KV_RW(Part)
+  module KV = Tar_mirage.Make_KV_RW(Pclock)(Part)
   module Cache = OneFFS.Make(Part)
-  module Store = Git_kv.Make (Pclock)
+  module Store = Git_kv.Make(Pclock)
 
   module SM = Map.Make(String)
   module SSet = Set.Make(String)

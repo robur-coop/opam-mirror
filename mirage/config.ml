@@ -89,11 +89,11 @@ let http_client =
   let packages =
     [ package ~pin:"git+https://git.robur.io/robur/http-mirage-client.git#main" "http-mirage-client" ] in
   let connect _ modname = function
-    | [ _time; _pclock; _tcpv4v6; ctx ] ->
+    | [ _pclock; _tcpv4v6; ctx ] ->
       Fmt.str {ocaml|%s.connect %s|ocaml} modname ctx
     | _ -> assert false in
   impl ~packages ~connect "Http_mirage_client.Make"
-    (time @-> pclock @-> tcpv4v6 @-> git_client @-> http_client)
+    (pclock @-> tcpv4v6 @-> git_client @-> http_client)
 (* XXX(dinosaure): [git_client] seems bad but it becames from a long discussion
    when a "mimic" device seems not accepted by everyone. We can copy [git_happy_eyeballs]
    and provide an [http_client] instead of a [git_client] but that mostly means that
@@ -104,7 +104,7 @@ let git_client, http_client =
   let happy_eyeballs = git_happy_eyeballs stack dns (generic_happy_eyeballs stack dns) in
   merge_git_clients (git_tcp tcp happy_eyeballs)
     (git_http ~authenticator:tls_authenticator tcp happy_eyeballs),
-  http_client $ default_time $ default_posix_clock $ tcp $ happy_eyeballs
+  http_client $ default_posix_clock $ tcp $ happy_eyeballs
 
 let program_block_size =
   let doc = Key.Arg.info [ "program-block-size" ] in
