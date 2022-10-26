@@ -11,8 +11,9 @@ module Make
   (HTTP : Http_mirage_client.S) = struct
 
   module Part = Mirage_block_partition.Make(BLOCK)
-  module KV = Tar_mirage.Make_KV_RW(Part)
+  module KV = Tar_mirage.Make_KV_RW(Pclock)(Part)
   module Cache = OneFFS.Make(Part)
+  module Store = Git_kv.Make(Pclock)
 
   module SM = Map.Make(String)
   module SSet = Set.Make(String)
@@ -53,17 +54,17 @@ module Make
   module Git = struct
     let find_contents store =
       let rec go store path acc =
-        Git_kv.list store path >>= function
+        Store.list store path >>= function
         | Error e ->
           Logs.err (fun m -> m "error %a while listing %a"
-                       Git_kv.pp_error e Mirage_kv.Key.pp path);
+                       Store.pp_error e Mirage_kv.Key.pp path);
           Lwt.return acc
         | Ok steps ->
           Lwt_list.fold_left_s (fun acc (step, _) ->
               let full_path = Mirage_kv.Key.add path step in
-              Git_kv.exists store full_path >>= function
+              Store.exists store full_path >>= function
               | Error e ->
-                Logs.err (fun m -> m "error %a for exists %a" Git_kv.pp_error e
+                Logs.err (fun m -> m "error %a for exists %a" Store.pp_error e
                              Mirage_kv.Key.pp full_path);
                 Lwt.return acc
               | Ok None ->
@@ -168,7 +169,7 @@ module Make
         List.filter (fun p -> Mirage_kv.Key.basename p = "opam") paths
       in
       Lwt_list.fold_left_s (fun acc path ->
-          Git_kv.get store path >|= function
+          Store.get store path >|= function
           | Ok data ->
             (* TODO report parser errors *)
             (try
@@ -194,7 +195,7 @@ module Make
              with _ ->
                Logs.warn (fun m -> m "some error in %a, ignoring" Mirage_kv.Key.pp path);
                acc)
-          | Error e -> Logs.warn (fun m -> m "Git_kv.get: %a" Git_kv.pp_error e); acc)
+          | Error e -> Logs.warn (fun m -> m "Store.get: %a" Store.pp_error e); acc)
         SM.empty opam_paths
   end
 
@@ -487,7 +488,7 @@ module Make
       in
       Git.find_contents store >>= fun paths ->
       Lwt_list.iter_s (fun path ->
-          Git_kv.get store path >|= function
+          Store.get store path >|= function
           | Ok data ->
             let data =
               if Mirage_kv.Key.(equal path (v "repo")) then repo else data
@@ -505,7 +506,7 @@ module Make
             let o = ref false in
             let stream () = if !o then None else (o := true; Some data) in
             Tar_Gz.write_block ~level:Tar.Header.Ustar hdr gz_out stream
-          | Error e -> Logs.warn (fun m -> m "Git_kv error: %a" Git_kv.pp_error e))
+          | Error e -> Logs.warn (fun m -> m "Store error: %a" Store.pp_error e))
         paths >|= fun () ->
       Tar_Gz.write_end gz_out;
       Buffer.contents out_channel
@@ -525,7 +526,7 @@ module Make
     Printf.sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT" weekday d m' y hh mm ss
 
     let commit_id git_kv =
-      Git_kv.digest git_kv Mirage_kv.Key.empty >|= fun r ->
+      Store.digest git_kv Mirage_kv.Key.empty >|= fun r ->
       Result.get_ok r
 
     let repo commit =
@@ -538,7 +539,7 @@ stamp: %S
 |} upstream commit commit
 
     let modified git_kv =
-      Git_kv.last_modified git_kv Mirage_kv.Key.empty >|= fun r ->
+      Store.last_modified git_kv Mirage_kv.Key.empty >|= fun r ->
       let v = Result.fold ~ok:Fun.id ~error:(fun _ -> Pclock.now_d_ps ()) r in
       ptime_to_http_date (Ptime.v v)
 
@@ -717,7 +718,7 @@ stamp: %S
 
   let bad_archives = SSet.of_list Bad.archives
 
-  let download_archives disk http_ctx store =
+  let download_archives disk http_client store =
     Git.find_urls store >>= fun urls ->
     let urls = SM.filter (fun k _ -> not (SSet.mem k bad_archives)) urls in
     let pool = Lwt_pool.create (Key_gen.parallel_downloads ()) (Fun.const Lwt.return_unit) in
@@ -736,10 +737,7 @@ stamp: %S
           incr idx;
           if !idx mod 10 = 0 then Gc.full_major () ;
           Logs.info (fun m -> m "downloading %s" url);
-          Http_mirage_client.one_request
-            ~alpn_protocol:HTTP.alpn_protocol
-            ~authenticator:HTTP.authenticator
-            ~ctx:http_ctx url >>= function
+          Http_mirage_client.one_request http_client url >>= function
           | Ok (resp, Some str) ->
             if resp.status = `OK then begin
               Logs.info (fun m -> m "downloaded %s" url);
