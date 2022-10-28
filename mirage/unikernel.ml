@@ -276,7 +276,7 @@ module Make
           read_more a 0
 
     (* on disk, we use a flat file system where the filename is the sha256 of the data *)
-    let init ~verify dev dev_md5s dev_sha512s =
+    let init ~verify_sha256 dev dev_md5s dev_sha512s =
       KV.list dev Mirage_kv.Key.empty >>= function
       | Error e -> Logs.err (fun m -> m "error %a listing kv" KV.pp_error e); assert false
       | Ok entries ->
@@ -284,14 +284,14 @@ module Make
         Cache.read t.dev_md5s >>= fun r ->
         (match r with
          | Ok Some s ->
-           if not verify then
+           if not verify_sha256 then
              Result.iter (fun md5s -> t.md5s <- md5s) (unmarshal_sm s)
          | Ok None -> Logs.debug (fun m -> m "No md5s cached")
          | Error e -> Logs.warn (fun m -> m "Error reading md5s cache: %a" Cache.pp_error e));
         Cache.read t.dev_sha512s >>= fun r ->
         (match r with
          | Ok Some s ->
-           if not verify then
+           if not verify_sha256 then
              Result.iter (fun sha512s -> t.sha512s <- sha512s) (unmarshal_sm s)
          | Ok None -> Logs.debug (fun m -> m "No sha512s cached")
          | Error e -> Logs.warn (fun m -> m "Error reading sha512s cache: %a" Cache.pp_error e));
@@ -307,7 +307,7 @@ module Make
             | `Value ->
               let open Mirage_crypto.Hash in
               let sha256_final =
-                if verify then
+                if verify_sha256 then
                   let f s =
                     let digest = SHA256.get s in
                     if not (String.equal name (to_hex digest)) then
@@ -771,7 +771,7 @@ stamp: %S
     Cache.connect sha512s >>= fun sha512s ->
     Cache.connect git_dump >>= fun git_dump ->
     Logs.info (fun m -> m "Available bytes in tar storage: %Ld" (KV.free kv));
-    Disk.init ~verify:(Key_gen.verify ()) kv md5s sha512s >>= fun disk ->
+    Disk.init ~verify_sha256:(Key_gen.verify_sha256 ()) kv md5s sha512s >>= fun disk ->
     if Key_gen.check () then
       Lwt.return_unit
     else
