@@ -9,11 +9,13 @@ let check =
   in
   Key.(create "check" Arg.(flag doc))
 
-let verify =
+let verify_sha256 =
   let doc =
-    Key.Arg.info ~doc:"Verify the cache contents" ["verify"]
+    Key.Arg.info ~doc:"Verify the SHA256 checksums of the cache contents, and \
+                       re-build the other checksum caches."
+      ["verify-sha256"]
   in
-  Key.(create "verify" Arg.(flag doc))
+  Key.(create "verify-sha256" Arg.(flag doc))
 
 let remote =
   let doc =
@@ -67,7 +69,7 @@ let ignore_local_git =
 
 let mirror =
   foreign "Unikernel.Make"
-    ~keys:[ Key.v check ; Key.v verify ; Key.v remote ;
+    ~keys:[ Key.v check ; Key.v verify_sha256 ; Key.v remote ;
             Key.v parallel_downloads ; Key.v hook_url ; Key.v tls_authenticator ;
             Key.v port ; Key.v sectors_cache ; Key.v sectors_git ;
             Key.v ignore_local_git ;
