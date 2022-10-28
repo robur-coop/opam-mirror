@@ -283,12 +283,16 @@ module Make
         let t = empty dev dev_md5s dev_sha512s in
         Cache.read t.dev_md5s >>= fun r ->
         (match r with
-         | Ok Some s -> Result.iter (fun md5s -> t.md5s <- md5s) (unmarshal_sm s)
+         | Ok Some s ->
+           if not verify then
+             Result.iter (fun md5s -> t.md5s <- md5s) (unmarshal_sm s)
          | Ok None -> Logs.debug (fun m -> m "No md5s cached")
          | Error e -> Logs.warn (fun m -> m "Error reading md5s cache: %a" Cache.pp_error e));
         Cache.read t.dev_sha512s >>= fun r ->
         (match r with
-         | Ok Some s -> Result.iter (fun sha512s -> t.sha512s <- sha512s) (unmarshal_sm s)
+         | Ok Some s ->
+           if not verify then
+             Result.iter (fun sha512s -> t.sha512s <- sha512s) (unmarshal_sm s)
          | Ok None -> Logs.debug (fun m -> m "No sha512s cached")
          | Error e -> Logs.warn (fun m -> m "Error reading sha512s cache: %a" Cache.pp_error e));
         let md5s = SSet.of_list (List.map snd (SM.bindings t.md5s))
@@ -321,18 +325,6 @@ module Make
                     t.md5s <- SM.add (to_hex digest) name t.md5s
                   in
                   Some f
-                else if verify then
-                  let f s =
-                    let digest = MD5.get s |> to_hex in
-                    match SM.find_opt digest t.md5s with
-                    | Some x when String.equal name x -> ()
-                    | y ->
-                      Logs.err (fun m -> m "corrupt MD5 data for %s, \
-                                            expected %a, computed %s"
-                                   name Fmt.(option ~none:(any "NONE") string) y
-                                   digest)
-                  in
-                  Some f
                 else
                   None
               and sha512_final =
@@ -340,18 +332,6 @@ module Make
                   let f s =
                     let digest = SHA512.get s in
                     t.sha512s <- SM.add (to_hex digest) name t.sha512s
-                  in
-                  Some f
-                else if verify then
-                  let f s =
-                    let digest = SHA512.get s |> to_hex in
-                    match SM.find_opt digest t.sha512s with
-                    | Some x when String.equal name x -> ()
-                    | y ->
-                      Logs.err (fun m -> m "corrupt SHA512 data for %s, \
-                                            expected %a, computed %s"
-                                   name Fmt.(option ~none:(any "NONE") string) y
-                                   digest)
                   in
                   Some f
                 else
