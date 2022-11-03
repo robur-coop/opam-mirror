@@ -97,7 +97,7 @@ let tcp = tcpv4v6_of_stackv4v6 stack
 
 let http_client =
   let packages =
-    [ package ~pin:"git+https://git.robur.io/robur/http-mirage-client.git#main" "http-mirage-client" ] in
+    [ package "http-mirage-client" ] in
   let connect _ modname = function
     | [ _pclock; _tcpv4v6; ctx ] ->
       Fmt.str {ocaml|%s.connect %s|ocaml} modname ctx

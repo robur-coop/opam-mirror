@@ -717,11 +717,12 @@ stamp: %S
           incr idx;
           if !idx mod 10 = 0 then Gc.full_major () ;
           Logs.info (fun m -> m "downloading %s" url);
-          Http_mirage_client.one_request http_client url >>= function
-          | Ok (resp, Some str) ->
+          let body _response acc data = Lwt.return (acc ^ data) in
+          Http_mirage_client.request http_client url body "" >>= function
+          | Ok (resp, body) ->
             if resp.status = `OK then begin
               Logs.info (fun m -> m "downloaded %s" url);
-              Disk.write disk ~url str csums
+              Disk.write disk ~url body csums
             end else begin
               Logs.warn (fun m -> m "%s: %a (reason %s)"
                             url H2.Status.pp_hum resp.status resp.reason);
