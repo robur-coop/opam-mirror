@@ -79,7 +79,7 @@ let mirror =
       package "h2" ;
       package "hex" ;
       package "httpaf" ;
-      package ~pin:"git+https://git.robur.io/robur/git-kv.git#main" "git-kv" ;
+      package "git-kv" ;
       package ~min:"3.10.0" "git-paf" ;
       package "opam-file-format" ;
       package ~min:"2.2.0" ~sublibs:[ "gz" ] "tar" ;
