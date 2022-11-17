@@ -777,6 +777,7 @@ stamp: %S
       Lwt.return_unit
     else
       begin
+        Logs.info (fun m -> m "Initializing git state. This may take a while...");
         (if Key_gen.ignore_local_git () then
            Lwt.return (Error ())
          else
@@ -787,6 +788,7 @@ stamp: %S
           dump_git git_dump git_kv >|= fun () ->
           git_kv
       end >>= fun git_kv ->
+      Logs.info (fun m -> m "Done initializing git state!");
       Serve.commit_id git_kv >>= fun commit_id ->
       Logs.info (fun m -> m "git: %s" commit_id);
       Serve.create git_kv >>= fun serve ->
