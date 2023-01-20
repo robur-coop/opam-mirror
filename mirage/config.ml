@@ -1,8 +1,5 @@
 open Mirage
 
-type http_client = HTTP_client
-let http_client = typ HTTP_client
-
 let check =
   let doc =
     Key.Arg.info ~doc:"Only check the cache" ["check"]
@@ -87,7 +84,7 @@ let mirror =
       package "mirage-block-partition" ;
       package "oneffs" ;
     ]
-    (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> http_client @-> job)
+    (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> alpn_client @-> job)
 
 let stack = generic_stackv4v6 default_network
 
@@ -95,26 +92,12 @@ let dns = generic_dns_client stack
 
 let tcp = tcpv4v6_of_stackv4v6 stack
 
-let http_client =
-  let packages =
-    [ package "http-mirage-client" ] in
-  let connect _ modname = function
-    | [ _pclock; _tcpv4v6; ctx ] ->
-      Fmt.str {ocaml|%s.connect %s|ocaml} modname ctx
-    | _ -> assert false in
-  impl ~packages ~connect "Http_mirage_client.Make"
-    (pclock @-> tcpv4v6 @-> git_client @-> http_client)
-(* XXX(dinosaure): [git_client] seems bad but it becames from a long discussion
-   when a "mimic" device seems not accepted by everyone. We can copy [git_happy_eyeballs]
-   and provide an [http_client] instead of a [git_client] but that mostly means that
-   2 instances of happy-eyeballs will exists together which is not really good
-   (it puts a pressure on the scheduler). *)
-
-let git_client, http_client =
-  let happy_eyeballs = git_happy_eyeballs stack dns (generic_happy_eyeballs stack dns) in
-  merge_git_clients (git_tcp tcp happy_eyeballs)
-    (git_http ~authenticator:tls_authenticator tcp happy_eyeballs),
-  http_client $ default_posix_clock $ tcp $ happy_eyeballs
+let git_client, alpn_client =
+  let happy_eyeballs = generic_happy_eyeballs stack dns in
+  let git_happy_eyeballs = git_happy_eyeballs stack dns happy_eyeballs in
+  merge_git_clients (git_tcp tcp git_happy_eyeballs)
+    (git_http ~authenticator:tls_authenticator tcp git_happy_eyeballs),
+  paf_client ~pclock:default_posix_clock tcp (mimic_happy_eyeballs stack dns happy_eyeballs)
 
 let program_block_size =
   let doc = Key.Arg.info [ "program-block-size" ] in
@@ -123,4 +106,4 @@ let program_block_size =
 let block = block_of_file "tar"
 
 let () = register "mirror"
-    [ mirror $ block $ default_time $ default_posix_clock $ stack $ git_client $ http_client ]
+    [ mirror $ block $ default_time $ default_posix_clock $ stack $ git_client $ alpn_client ]
