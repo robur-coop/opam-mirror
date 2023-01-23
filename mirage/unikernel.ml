@@ -41,6 +41,8 @@ module Make
     let `Hex h = Hex.of_string h in
     h
 
+  let hex_to_key h = Mirage_kv.Key.v (hex_to_string h)
+
   let hex_of_string s =
     match Hex.to_string (`Hex s) with
     | d -> Ok d
@@ -61,17 +63,16 @@ module Make
           Lwt.return acc
         | Ok steps ->
           Lwt_list.fold_left_s (fun acc (step, _) ->
-              let full_path = Mirage_kv.Key.add path step in
-              Store.exists store full_path >>= function
+              Store.exists store step >>= function
               | Error e ->
                 Logs.err (fun m -> m "error %a for exists %a" Store.pp_error e
-                             Mirage_kv.Key.pp full_path);
+                             Mirage_kv.Key.pp step);
                 Lwt.return acc
               | Ok None ->
-                Logs.warn (fun m -> m "no typ for %a" Mirage_kv.Key.pp full_path);
+                Logs.warn (fun m -> m "no typ for %a" Mirage_kv.Key.pp step);
                 Lwt.return acc
-              | Ok Some `Value -> Lwt.return (full_path :: acc)
-              | Ok Some `Dictionary -> go store full_path acc) acc steps
+              | Ok Some `Value -> Lwt.return (step :: acc)
+              | Ok Some `Dictionary -> go store step acc) acc steps
       in
       go store Mirage_kv.Key.empty []
 
@@ -239,8 +240,10 @@ module Make
     let find_key t h key =
       match
         match h with
-        | `MD5 -> SM.find_opt key t.md5s
-        | `SHA512 -> SM.find_opt key t.sha512s
+        | `MD5 ->
+          Option.map Mirage_kv.Key.v (SM.find_opt (Mirage_kv.Key.basename key) t.md5s)
+        | `SHA512 ->
+          Option.map Mirage_kv.Key.v (SM.find_opt (Mirage_kv.Key.basename key) t.sha512s)
         | `SHA256 -> Some key
         | _ -> None
       with
@@ -250,13 +253,12 @@ module Make
     let read_chunked t h v f a =
       match find_key t h v with
       | Error `Not_found ->
-        Lwt.return (Error (`Not_found (Mirage_kv.Key.v v)))
-      | Ok x ->
-        let key = Mirage_kv.Key.v x in
+        Lwt.return (Error (`Not_found v))
+      | Ok key ->
         KV.size t.dev key >>= function
         | Error e ->
-          Logs.err (fun m -> m "error %a while reading %s %s"
-                       KV.pp_error e (hash_to_string h) v);
+          Logs.err (fun m -> m "error %a while reading %s %a"
+                       KV.pp_error e (hash_to_string h) Mirage_kv.Key.pp v);
           Lwt.return (Error (`Not_found key))
         | Ok len ->
           let chunk_size = 4096 in
@@ -265,15 +267,15 @@ module Make
               KV.get_partial t.dev key ~offset ~length:chunk_size >>= function
               | Ok data ->
                 f a data >>= fun a ->
-                read_more a (offset + chunk_size)
+                read_more a Optint.Int63.(add offset (of_int chunk_size))
               | Error e ->
-                Logs.err (fun m -> m "error %a while reading %s %s"
-                             KV.pp_error e (hash_to_string h) v);
+                Logs.err (fun m -> m "error %a while reading %s %a"
+                             KV.pp_error e (hash_to_string h) Mirage_kv.Key.pp v);
                 Lwt.return (Error e)
             else
               Lwt.return (Ok a)
           in
-          read_more a 0
+          read_more a Optint.Int63.zero
 
     (* on disk, we use a flat file system where the filename is the sha256 of the data *)
     let init ~verify_sha256 dev dev_md5s dev_sha512s =
@@ -298,11 +300,11 @@ module Make
         let md5s = SSet.of_list (List.map snd (SM.bindings t.md5s))
         and sha512s = SSet.of_list (List.map snd (SM.bindings t.sha512s)) in
         let idx = ref 1 in
-        Lwt_list.iter_s (fun (name, typ) ->
+        Lwt_list.iter_s (fun (path, typ) ->
             if !idx mod 10 = 0 then Gc.full_major () ;
             match typ with
             | `Dictionary ->
-              Logs.warn (fun m -> m "unexpected dictionary at %s" name);
+              Logs.warn (fun m -> m "unexpected dictionary at %a" Mirage_kv.Key.pp path);
               Lwt.return_unit
             | `Value ->
               let open Mirage_crypto.Hash in
@@ -310,28 +312,28 @@ module Make
                 if verify_sha256 then
                   let f s =
                     let digest = SHA256.get s in
-                    if not (String.equal name (to_hex digest)) then
-                      Logs.err (fun m -> m "corrupt SHA256 data for %s, \
+                    if not (String.equal (Mirage_kv.Key.basename path) (to_hex digest)) then
+                      Logs.err (fun m -> m "corrupt SHA256 data for %a, \
                                             computed %s (should remove)"
-                                   name (to_hex digest))
+                                   Mirage_kv.Key.pp path (to_hex digest))
                   in
                   Some f
                 else
                   None
               and md5_final =
-                if not (SSet.mem name md5s) then
+                if not (SSet.mem (Mirage_kv.Key.basename path) md5s) then
                   let f s =
                     let digest = MD5.get s in
-                    t.md5s <- SM.add (to_hex digest) name t.md5s
+                    t.md5s <- SM.add (to_hex digest) (Mirage_kv.Key.basename path) t.md5s
                   in
                   Some f
                 else
                   None
               and sha512_final =
-                if not (SSet.mem name sha512s) then
+                if not (SSet.mem (Mirage_kv.Key.basename path) sha512s) then
                   let f s =
                     let digest = SHA512.get s in
-                    t.sha512s <- SM.add (to_hex digest) name t.sha512s
+                    t.sha512s <- SM.add (to_hex digest) (Mirage_kv.Key.basename path) t.sha512s
                   in
                   Some f
                 else
@@ -340,7 +342,7 @@ module Make
               match sha256_final, md5_final, sha512_final with
               | None, None, None -> Lwt.return_unit
               | _ ->
-                read_chunked t `SHA256 name
+                read_chunked t `SHA256 path
                   (fun (sha256, md5, sha512) data ->
                      let cs = Cstruct.of_string data in
                      Lwt.return
@@ -351,13 +353,13 @@ module Make
                    Option.map (fun _ -> MD5.empty) md5_final,
                    Option.map (fun _ -> SHA512.empty) sha512_final) >|= function
                 | Error e ->
-                  Logs.err (fun m -> m "error %a of %s while computing digests"
-                               KV.pp_error e name)
+                  Logs.err (fun m -> m "error %a of %a while computing digests"
+                               KV.pp_error e Mirage_kv.Key.pp path)
                 | Ok (sha256, md5, sha512) ->
                   Option.iter (fun f -> f (Option.get sha256)) sha256_final;
                   Option.iter (fun f -> f (Option.get md5)) md5_final;
                   Option.iter (fun f -> f (Option.get sha512)) sha512_final;
-                  Logs.info (fun m -> m "added %s" name))
+                  Logs.info (fun m -> m "added %a" Mirage_kv.Key.pp path))
           entries >>= fun () ->
         update_caches t >|= fun () ->
         t
@@ -398,38 +400,38 @@ module Make
       match find_key t h v with
       | Error _ -> Lwt.return false
       | Ok x ->
-        KV.exists t.dev (Mirage_kv.Key.v x) >|= function
+        KV.exists t.dev x >|= function
         | Ok Some `Value -> true
         | Ok Some `Dictionary ->
-          Logs.err (fun m -> m "unexpected dictionary for %s %s"
-                       (hash_to_string h) v);
+          Logs.err (fun m -> m "unexpected dictionary for %s %a"
+                       (hash_to_string h) Mirage_kv.Key.pp v);
           false
         | Ok None -> false
         | Error e ->
-          Logs.err (fun m -> m "exists %s %s returned %a"
-                       (hash_to_string h) v KV.pp_error e);
+          Logs.err (fun m -> m "exists %s %a returned %a"
+                       (hash_to_string h) Mirage_kv.Key.pp v KV.pp_error e);
           false
 
     let last_modified t h v =
       match find_key t h v with
       | Error _ as e -> Lwt.return e
       | Ok x ->
-        KV.last_modified t.dev (Mirage_kv.Key.v x) >|= function
+        KV.last_modified t.dev x >|= function
         | Ok data -> Ok data
         | Error e ->
-          Logs.err (fun m -> m "error %a while last_modified %s %s"
-                       KV.pp_error e (hash_to_string h) v);
+          Logs.err (fun m -> m "error %a while last_modified %s %a"
+                       KV.pp_error e (hash_to_string h) Mirage_kv.Key.pp v);
           Error `Not_found
 
     let size t h v =
       match find_key t h v with
       | Error _ as e -> Lwt.return e
       | Ok x ->
-        KV.size t.dev (Mirage_kv.Key.v x) >|= function
+        KV.size t.dev x >|= function
         | Ok s -> Ok s
         | Error e ->
-          Logs.err (fun m -> m "error %a while size %s %s"
-                       KV.pp_error e (hash_to_string h) v);
+          Logs.err (fun m -> m "error %a while size %s %a"
+                       KV.pp_error e (hash_to_string h) Mirage_kv.Key.pp v);
           Error `Not_found
     end
 
@@ -520,8 +522,12 @@ stamp: %S
 
     let modified git_kv =
       Store.last_modified git_kv Mirage_kv.Key.empty >|= fun r ->
-      let v = Result.fold ~ok:Fun.id ~error:(fun _ -> Pclock.now_d_ps ()) r in
-      ptime_to_http_date (Ptime.v v)
+      let v =
+        Result.fold r
+          ~ok:Fun.id
+          ~error:(fun _ -> Ptime.v (Pclock.now_d_ps ()))
+      in
+      ptime_to_http_date v
 
     type t = {
       mutable commit_id : string ;
@@ -654,13 +660,14 @@ stamp: %S
             Logs.warn (fun m -> m "error decoding hash algo: %s" msg);
             not_found reqd request.Httpaf.Request.target
           | Ok h ->
+            let hash = Mirage_kv.Key.v hash in
             Lwt.async (fun () ->
                 (Disk.last_modified store h hash >|= function
                   | Error _ ->
                     Logs.warn (fun m -> m "error retrieving last modified");
                     t.modified
-                  | Ok v -> ptime_to_http_date (Ptime.v v)) >>= fun last_modified ->
-                if not_modified request (last_modified, hash) then
+                  | Ok v -> ptime_to_http_date v) >>= fun last_modified ->
+                if not_modified request (last_modified, Mirage_kv.Key.basename hash) then
                   let resp = Httpaf.Response.create `Not_modified in
                   respond_with_empty reqd resp;
                   Lwt.return_unit
@@ -671,11 +678,11 @@ stamp: %S
                     not_found reqd request.Httpaf.Request.target;
                     Lwt.return_unit
                   | Ok size ->
-                    let size = string_of_int size in
+                    let size = Optint.Int63.to_string size in
                     let mime_type = "application/octet-stream" in
                     let headers = [
                       "content-type", mime_type ;
-                      "etag", hash ;
+                      "etag", Mirage_kv.Key.basename hash ;
                       "last-modified", last_modified ;
                       "content-length", size ;
                     ]
@@ -707,7 +714,7 @@ stamp: %S
         Lwt_pool.use pool @@ fun () ->
         HM.fold (fun h v r ->
             r >>= function
-            | true -> Disk.exists disk h (hex_to_string v)
+            | true -> Disk.exists disk h (hex_to_key v)
             | false -> Lwt.return false)
           csums (Lwt.return true) >>= function
         | true ->
