@@ -468,7 +468,7 @@ module Make
         let dest = to_delete_key (hash, csum) in
         (* if the checksums mismatch we need to mark the file for deletion *)
         KV.rename t.dev ~source ~dest >|= function
-        | Ok () -> Ok ()
+        | Ok () -> Error (`Bad_checksum (hash, csum))
         | Error e ->
           Logs.warn (fun m -> m "Error renaming file %a -> %a: %a"
                         Mirage_kv.Key.pp source Mirage_kv.Key.pp dest KV.pp_write_error e);
@@ -886,6 +886,7 @@ stamp: %S
                     let body = Httpaf.Reqd.respond_with_streaming reqd resp in
                     Disk.read_chunked store h hash (fun () chunk ->
                         let wait, wakeup = Lwt.task () in
+                        (* FIXME: catch exception when body is closed *)
                         Httpaf.Body.write_string body chunk;
                         Httpaf.Body.flush body (Lwt.wakeup wakeup);
                         wait) () >|= fun _ ->
