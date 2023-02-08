@@ -465,14 +465,26 @@ module Make
           Ok ()
         | Error e -> Error (`Write_error e)
       else
-        let dest = to_delete_key (hash, csum) in
-        (* if the checksums mismatch we need to mark the file for deletion *)
-        KV.rename t.dev ~source ~dest >|= function
-        | Ok () -> Error (`Bad_checksum (hash, csum))
+        (* if the checksums mismatch we want to delete the file. We are only
+           able to do so if it was the latest created file, so we expect and
+           error. Ideally, we want to match for `Append_only or other errors *)
+        KV.remove t.dev source >>= function
+        | Ok () ->
+          Logs.info (fun m -> m "Removed %a" Mirage_kv.Key.pp source);
+          Lwt_result.fail (`Bad_checksum (hash, csum))
         | Error e ->
-          Logs.warn (fun m -> m "Error renaming file %a -> %a: %a"
-                        Mirage_kv.Key.pp source Mirage_kv.Key.pp dest KV.pp_write_error e);
-          Error (`Bad_checksum (hash, csum))
+          Logs.debug (fun m -> m "Failed to remove %a: %a"
+                         Mirage_kv.Key.pp source KV.pp_write_error e);
+          (* we failed to delete the file so we mark it for deletion *)
+          let dest = to_delete_key (hash, csum) in
+          Logs.warn (fun m -> m "Failed to remove %a: %a. Moving it to %a"
+                        Mirage_kv.Key.pp source KV.pp_write_error e Mirage_kv.Key.pp dest);
+          KV.rename t.dev ~source ~dest >|= function
+          | Ok () -> Error (`Bad_checksum (hash, csum))
+          | Error e ->
+            Logs.warn (fun m -> m "Error renaming file %a -> %a: %a"
+                          Mirage_kv.Key.pp source Mirage_kv.Key.pp dest KV.pp_write_error e);
+            Error (`Bad_checksum (hash, csum))
 
 
     (* on disk, we use a flat file system where the filename is the sha256 of the data *)
