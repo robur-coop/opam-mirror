@@ -116,6 +116,19 @@ module Make
       *)
       let open OpamParserTypes.FullPos in
       let opamfile = OpamParser.FullPos.string str filename in
+      let unavailable =
+        List.exists
+          (function
+            | { pelem = Variable ({ pelem = "available" ; _ },
+                                  { pelem = (Bool false | List { pelem = [{ pelem = Bool false; _ }] ; _ }); _ })
+              ; _ } -> true
+            | _ -> false)
+          opamfile.file_contents
+      in
+      if unavailable then
+        (Logs.info (fun m -> m "%s is marked unavailable, skipping" filename);
+         None)
+      else
       let url_section =
         List.find_opt (function
             | { pelem = Section ({ section_kind = { pelem = "url" ; _ } ; _ }) ; _} -> true | _ -> false)
