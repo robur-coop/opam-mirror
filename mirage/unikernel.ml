@@ -503,12 +503,14 @@ module Make
         (fun (h, csum) -> String.equal csum (HM.find h csums))
         common_bindings
 
-    let finalize_write t (hash, csum) ~url body csums digests =
+    let finalize_write t (hash, csum) ~url (body : [ `Unknown of string | `Fixed_body of int64 * Optint.Int63.t | `Init ]) csums digests =
       let sizes_match, body_size_in_header =
         match body with
-        | `Fixed_body (reported, actual) -> Optint.Int63.(equal (of_int reported) actual), true
+        | `Fixed_body (reported, actual) -> Optint.Int63.(equal (of_int64 reported) actual), true
         | `Unknown _ -> true, false
+        | `Init -> assert false
       in
+      let source = pending_key (hash, csum) in
       if check_csums_digests csums digests && sizes_match then
         let sha256 = to_hex (Mirage_crypto.Hash.SHA256.get digests.sha256)
         and md5 = to_hex (Mirage_crypto.Hash.MD5.get digests.md5)
@@ -518,23 +520,26 @@ module Make
         | `Unknown body ->
           Logs.info (fun m -> m "downloaded %s, now writing" url);
           KV.set t.dev dest body
-        | `Fixed_body (reported_size, actual_size) ->
+        | `Fixed_body (_reported_size, _actual_size) ->
           Logs.info (fun m -> m "downloaded %s" url);
-          let source = pending_key (hash, csum) in
           KV.rename t.dev ~source ~dest
-        end >|= function  
+        | `Init -> assert false
+        end >|= function
         | Ok () ->
           t.md5s <- SM.add md5 sha256 t.md5s;
           t.sha512s <- SM.add sha512 sha256 t.sha512s
         | Error e ->
           Logs.err (fun m -> m "Write failure for %s: %a" url KV.pp_write_error e)
       else begin
-        if sizes_match then
-          Logs.err (fun m -> m "Bad checksum %s: computed %s expected %s" url
-                       (hash_to_string hash) (hex_to_string csum))
-        else
-          Logs.err (fun m -> m "Size mismatch %s: received %a bytes expected %a bytes" url
-                       Optint.Int63.pp actual Optint.Int63.pp reported);
+        (if sizes_match then
+           Logs.err (fun m -> m "Bad checksum %s: computed %s expected %s" url
+                        (hash_to_string hash) (hex_to_string csum))
+         else match body with
+           | `Fixed_body (reported, actual) ->
+             Logs.err (fun m -> m "Size mismatch %s: received %a bytes expected %Lu bytes"
+                          url Optint.Int63.pp actual reported)
+           | `Unknown _ -> assert false
+           | `Init -> assert false);
         if body_size_in_header then
           (* if the checksums mismatch we want to delete the file. We are only
              able to do so if it was the latest created file, so we expect and
