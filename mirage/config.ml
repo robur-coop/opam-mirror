@@ -83,7 +83,6 @@ let mirror =
       package ~min:"2.2.0" "tar-mirage" ;
       package "mirage-block-partition" ;
       package "oneffs" ;
-      package "gmp" ;
     ]
     (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> alpn_client @-> job)
 
