@@ -39,7 +39,9 @@ let archives =
     "https://github.com/chetmurthy/pa_ppx/archive/0.01.tar.gz" ;
     "https://github.com/chambart/ocaml-1/archive/lto.tar.gz" ;
     "https://github.com/Kappa-Dev/KaSim/archive/v3.5-250915.tar.gz" ;
-    "https://github.com/bsansouci/bsb-native/archive/1.9.4.tar.gz"
+    "https://github.com/bsansouci/bsb-native/archive/1.9.4.tar.gz";
+    "https://github.com/sanette/oplot/archive/0.7.tar.gz";
+    "https://github.com/ulrikstrid/ocaml-cookie/releases/download/0.1.8/session-cookie-lwt-0.1.8.tbz";
   ]
 
   and bad_request = [

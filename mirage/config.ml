@@ -94,9 +94,9 @@ let tcp = tcpv4v6_of_stackv4v6 stack
 
 let git_client, alpn_client =
   let happy_eyeballs = generic_happy_eyeballs stack dns in
-  let git_happy_eyeballs = git_happy_eyeballs stack dns happy_eyeballs in
-  merge_git_clients (git_tcp tcp git_happy_eyeballs)
-    (git_http ~authenticator:tls_authenticator tcp git_happy_eyeballs),
+  let git = mimic_happy_eyeballs stack dns happy_eyeballs in
+  merge_git_clients (git_tcp tcp git)
+    (git_http ~authenticator:tls_authenticator tcp git),
   paf_client ~pclock:default_posix_clock tcp (mimic_happy_eyeballs stack dns happy_eyeballs)
 
 let program_block_size =
