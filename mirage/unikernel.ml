@@ -1031,17 +1031,83 @@ stamp: %S
 
   module Paf = Paf_mirage.Make(Stack.TCP)
 
+  let read_partition_table info block =
+    let b = Cstruct.create info.Mirage_block.sector_size in
+    (* We will ignore the protective MBR at lba [0L] *)
+    BLOCK.read block 1L [b] >>= fun r ->
+    match r with
+    | Error e ->
+      Format.kasprintf failwith "Reading partition table: %a"
+        BLOCK.pp_error e
+    | Ok () ->
+      match Gpt.unmarshal b ~sector_size:info.Mirage_block.sector_size with
+      | Error e ->
+        Format.kasprintf failwith "Reading partition table: %s" e
+      | Ok (`Read_partition_table (lba, sectors), k) ->
+        let b = Cstruct.create (sectors * info.Mirage_block.sector_size) in
+        BLOCK.read block lba [b] >>= fun r ->
+        match r with
+        | Error e ->
+          Format.kasprintf failwith "Reading partition table: %a"
+            BLOCK.pp_error e
+        | Ok () ->
+          match k b with
+          | Error e ->
+            Format.kasprintf failwith "Reading partition table: %s" e
+          | Ok gpt -> Lwt.return gpt
+
+  let get_partitions info block =
+    let utf16be_of_ascii s =
+      String.init 72
+        (fun i ->
+           if i mod 2 = 0 && i / 2 < String.length s then
+             s.[i/2]
+           else
+             '\000')
+    in
+    read_partition_table info block >>= fun gpt ->
+    let tar, git_dump, md5s, sha512s =
+      match
+        List.fold_left
+          (fun (tar, git_dump, md5s, sha512s) p ->
+             if String.equal p.Gpt.Partition.name
+                 (utf16be_of_ascii "tar")
+             then
+               (Some p, git_dump, md5s, sha512s)
+             else if String.equal p.name
+                 (utf16be_of_ascii "git_dump")
+             then
+               (tar, Some p, md5s, sha512s)
+             else if String.equal p.name
+                 (utf16be_of_ascii "md5s")
+             then
+               (tar, git_dump, Some p, sha512s)
+             else if String.equal p.name
+                 (utf16be_of_ascii "sha512s")
+             then
+               (tar, git_dump, md5s, Some p)
+             else
+               Format.kasprintf failwith "Unknown partition %S" p.name)
+          (None, None, None, None)
+          gpt.partitions
+      with
+      | (Some tar, Some git_dump, Some md5s, Some sha512s) ->
+        (tar, git_dump, md5s, sha512s)
+      | _ ->
+        failwith "not all partitions found :("
+    in
+    Part.connect 0L block >>= fun (_empty, p) ->
+    let get_part part =
+      let len = Int64.(succ (sub part.Gpt.Partition.ending_lba part.starting_lba)) in
+      let (_before, after) = Part.subpartition part.starting_lba p in
+      let (part, _after) = Part.subpartition len after in
+      part
+    in
+    Lwt.return (get_part tar, get_part git_dump, get_part md5s, get_part sha512s)
+
   let start block _time _pclock stack git_ctx http_ctx =
     BLOCK.get_info block >>= fun info ->
-    let sectors_cache = Key_gen.sectors_cache () in
-    let sectors_git = Key_gen.sectors_git () in
-    let git_start =
-      let cache_size = Int64.(mul 2L sectors_cache) in
-      Int64.(sub info.size_sectors (add cache_size sectors_git))
-    in
-    Part.connect git_start block >>= fun (kv, rest) ->
-    let git_dump, rest = Part.subpartition sectors_git rest in
-    let md5s, sha512s = Part.subpartition sectors_cache rest in
+    get_partitions info block >>= fun (kv, git_dump, md5s, sha512s) ->
     KV.connect kv >>= fun kv ->
     Cache.connect md5s >>= fun md5s ->
     Cache.connect sha512s >>= fun sha512s ->
