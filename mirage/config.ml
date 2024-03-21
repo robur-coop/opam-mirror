@@ -81,7 +81,7 @@ let mirror =
       package "opam-file-format" ;
       package ~min:"2.2.0" ~sublibs:[ "gz" ] "tar" ;
       package ~min:"2.2.0" "tar-mirage" ;
-      package "mirage-block-partition" ;
+      package ~max:"0.2.0" "mirage-block-partition" ;
       package "oneffs" ;
     ]
     (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> alpn_client @-> job)
