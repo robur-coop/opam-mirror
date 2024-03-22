@@ -1,0 +1,3 @@
+(executable
+ (name mkimg)
+ (libraries unix cstruct gptar gpt uuidm cmdliner))
