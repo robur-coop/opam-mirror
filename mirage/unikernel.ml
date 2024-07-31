@@ -778,62 +778,73 @@ module Make
     end
 
   module Tarball = struct
-    module Async = struct
-      type 'a t = 'a
-      let ( >>= ) x f = f x
-      let return x = x
+    module High : sig
+      type t
+      type 'a s = 'a Lwt.t
+
+      external inj : 'a s -> ('a, t) Tar.io = "%identity"
+      external prj : ('a, t) Tar.io -> 'a s = "%identity"
+    end = struct
+      type t
+      type 'a s = 'a Lwt.t
+
+      external inj : 'a -> 'b = "%identity"
+      external prj : 'a -> 'b = "%identity"
     end
 
-    module Writer = struct
-      type out_channel = Buffer.t
-      type 'a t = 'a
-      let really_write buf data =
-        Buffer.add_string buf (Cstruct.to_string data)
-    end
+    let to_buffer buf t =
+      let rec run : type a. (a, [> `Msg of string ] as 'err, High.t) Tar.t -> (a, 'err) result Lwt.t
+        = function
+        | Tar.Write str ->
+          Buffer.add_string buf str;
+          Lwt.return_ok ()
+        | Tar.Read _ -> assert false
+        | Tar.Really_read _ -> assert false
+        | Tar.Seek _ -> assert false
+        | Tar.Return value -> Lwt.return value
+        | Tar.High value -> High.prj value
+        | Tar.Bind (x, f) ->
+            let open Lwt_result.Infix in
+            run x >>= fun value -> run (f value) in
+      run t
 
-    (* That's not very interesting here, we just ignore everything*)
-    module Reader = struct
-      type in_channel = unit
-      type 'a t = 'a
-      let really_read _in _data = ()
-      let skip _in _len = ()
-      let read _in _data = 0
-    end
+    let once data =
+      let closed = ref false in
+      fun () -> if !closed
+        then Tar.High (High.inj (Lwt.return_ok None))
+        else begin closed := true; Tar.High (High.inj (Lwt.return_ok (Some  data))) end
 
-    module Tar_Gz = Tar_gz.Make (Async)(Writer)(Reader)
+    let entries_of_git ~mtime store repo =
+      Git.find_contents store >>= fun paths ->
+      let entries = Lwt_stream.of_list paths in
+      let to_entry path =
+        Store.get store path >|= function
+        | Ok data ->
+          let data =
+            if Mirage_kv.Key.(equal path (v "repo"))
+            then repo else data in
+          let file_mode = 0o644
+          and mod_time = Int64.of_int mtime
+          and user_id = 0
+          and group_id = 0
+          and size = String.length data in
+          let hdr = Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
+            (Mirage_kv.Key.to_string path) (Int64.of_int size) in
+          Some (None, hdr, once data)
+        | Error _ -> None in
+      let entries = Lwt_stream.filter_map_s to_entry entries in
+      Lwt.return begin fun () -> Tar.High (High.inj (Lwt_stream.get entries >|= Result.ok)) end
 
     let of_git repo store =
-      let out_channel = Buffer.create 1024 in
       let now = Ptime.v (Pclock.now_d_ps ()) in
       let mtime = Option.value ~default:0 Ptime.(Span.to_int_s (to_span now)) in
-      let gz_out =
-        Tar_Gz.of_out_channel ~level:4 ~mtime:(Int32.of_int mtime)
-          Gz.Unix out_channel
-      in
-      Git.find_contents store >>= fun paths ->
-      Lwt_list.iter_s (fun path ->
-          Store.get store path >|= function
-          | Ok data ->
-            let data =
-              if Mirage_kv.Key.(equal path (v "repo")) then repo else data
-            in
-            let file_mode = 0o644 (* would be great to retrieve the actual one - but not needed (since opam-repository doesn't use it anyways)! *)
-            and mod_time = Int64.of_int mtime
-            and user_id = 0
-            and group_id = 0
-            and size = String.length data
-            in
-            let hdr =
-              Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
-                (Mirage_kv.Key.to_string path) (Int64.of_int size)
-            in
-            let o = ref false in
-            let stream () = if !o then None else (o := true; Some data) in
-            Tar_Gz.write_block ~level:Tar.Header.Ustar hdr gz_out stream
-          | Error e -> Logs.warn (fun m -> m "Store error: %a" Store.pp_error e))
-        paths >|= fun () ->
-      Tar_Gz.write_end gz_out;
-      Buffer.contents out_channel
+      entries_of_git ~mtime store repo >>= fun entries ->
+      let t = Tar.out entries in
+      let t = Tar_gz.out_gzipped ~level:4 ~mtime:(Int32.of_int mtime) Gz.Unix t in
+      let buf = Buffer.create 1024 in
+      to_buffer buf t >|= function
+      | Ok () -> Buffer.contents buf
+      | Error (`Msg msg) -> failwith msg
   end
 
   module Serve = struct
