@@ -38,8 +38,8 @@ let mirror =
       package ~max:"0.0.5" "git-kv" ;
       package ~min:"3.10.0" "git-paf" ;
       package "opam-file-format" ;
-      package ~min:"2.2.0" ~sublibs:[ "gz" ] "tar" ~pin:"https://github.com/mirage/ocaml-tar.git#da4b1eb9fb903b3e6641b09e712156bd4a826f84";
-      package ~min:"2.2.0" "tar-mirage" ~pin:"https://github.com/mirage/ocaml-tar.git#da4b1eb9fb903b3e6641b09e712156bd4a826f84";
+      package ~min:"2.2.0" ~sublibs:[ "gz" ] "tar" ~pin:"git+https://github.com/mirage/ocaml-tar.git#4215ff02d87486ade54e1a3ede43cce476f791cf";
+      package ~min:"2.2.0" "tar-mirage" ~pin:"git+https://github.com/mirage/ocaml-tar.git#4215ff02d87486ade54e1a3ede43cce476f791cf" ;
       package ~max:"0.2.0" "mirage-block-partition" ;
       package "oneffs" ;
     ]
