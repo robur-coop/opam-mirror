@@ -102,58 +102,24 @@ module Make
   module SM = Map.Make(String)
   module SSet = Set.Make(String)
 
-  let compare_hash h h' =
-    match h, h' with
-    | `SHA512, `SHA512 -> 0
-    | `SHA512, _ -> 1
-    | _, `SHA512 -> -1
-    | `SHA384, `SHA384 -> 0
-    | `SHA384, _ -> 1
-    | _, `SHA384 -> -1
-    | `SHA256, `SHA256 -> 0
-    | `SHA256, _ -> 1
-    | _, `SHA256 -> -1
-    | `SHA224, `SHA224 -> 0
-    | `SHA224, _ -> 1
-    | _, `SHA224 -> -1
-    | `SHA1, `SHA1 -> 0
-    | `SHA1, `MD5 -> 1
-    | `MD5, `MD5 -> 0
-    | `MD5, _ -> -1
+  let compare_hash = Archive_checksum.Hash.compare
 
-  module HM = Map.Make(struct
-      type t = Mirage_crypto.Hash.hash
-      let compare = compare_hash
-    end)
+  module HM = Archive_checksum.HM
 
-  let hash_to_string = function
-    | `MD5 -> "md5"
-    | `SHA1 -> "sha1"
-    | `SHA224 -> "sha224"
-    | `SHA256 -> "sha256"
-    | `SHA384 -> "sha384"
-    | `SHA512 -> "sha512"
+  let hash_to_string = Archive_checksum.Hash.to_string
 
-  let hash_of_string = function
-    | "md5" -> Ok `MD5
-    | "sha256" -> Ok `SHA256
-    | "sha512" -> Ok `SHA512
-    | h -> Error (`Msg ("unknown hash algorithm: " ^ h))
+  let hash_of_string = Archive_checksum.Hash.of_string
 
-  let hex_to_string h =
-    let `Hex h = Hex.of_string h in
-    h
-
-  let hex_to_key h = Mirage_kv.Key.v (hex_to_string h)
+  let hex_to_key h = Mirage_kv.Key.v (Ohex.encode h)
 
   let hex_of_string s =
-    match Hex.to_string (`Hex s) with
+    match Ohex.decode s with
     | d -> Ok d
     | exception Invalid_argument err -> Error (`Msg err)
 
   let hm_to_s hm =
     HM.fold (fun h v acc ->
-        hash_to_string h ^ "=" ^ hex_to_string v ^ "\n" ^ acc)
+        hash_to_string h ^ "=" ^ Ohex.encode v ^ "\n" ^ acc)
       hm ""
 
   module Git = struct
@@ -258,7 +224,7 @@ module Make
                               | Some v' when String.equal v v' -> None
                               | Some v' ->
                                 Logs.warn (fun m -> m "for %s, hash %s, multiple keys are present: %s %s"
-                                              (Option.value ~default:"NONE" url) (hash_to_string h) (hex_to_string v) (hex_to_string v'));
+                                              (Option.value ~default:"NONE" url) (hash_to_string h) (Ohex.encode v) (Ohex.encode v'));
                                 None)
                             acc
                       end
@@ -331,9 +297,6 @@ module Make
 
     let empty dev dev_md5s dev_sha512s = { md5s = SM.empty ; sha512s = SM.empty ; dev; dev_md5s; dev_sha512s }
 
-    let to_hex d =
-      let d = Cstruct.to_string d in
-      hex_to_string d
 
     let marshal_sm (sm : string SM.t) =
       let version = char_of_int 1 in
@@ -427,74 +390,6 @@ module Make
     end
        *)
 
-    module Running_hash = struct
-      type _ t =
-        | MD5 : Mirage_crypto.Hash.MD5.t -> [> `MD5 ] t
-        | SHA1 : Mirage_crypto.Hash.SHA1.t -> [> `SHA1 ] t
-        | SHA224 : Mirage_crypto.Hash.SHA224.t -> [> `SHA224 ] t
-        | SHA256 : Mirage_crypto.Hash.SHA256.t -> [> `SHA256 ] t
-        | SHA384 : Mirage_crypto.Hash.SHA384.t -> [> `SHA384 ] t
-        | SHA512 : Mirage_crypto.Hash.SHA512.t -> [> `SHA512 ] t
-
-      let empty : _ -> _ t = function
-        | `MD5 -> MD5 Mirage_crypto.Hash.MD5.empty
-        | `SHA1 -> SHA1 Mirage_crypto.Hash.SHA1.empty
-        | `SHA224 -> SHA224 Mirage_crypto.Hash.SHA224.empty
-        | `SHA256 -> SHA256 Mirage_crypto.Hash.SHA256.empty
-        | `SHA384 -> SHA384 Mirage_crypto.Hash.SHA384.empty
-        | `SHA512 -> SHA512 Mirage_crypto.Hash.SHA512.empty
-
-      let feed t data =
-        let open Mirage_crypto.Hash in
-        match t with
-        | MD5 t -> MD5 (MD5.feed t data)
-        | SHA1 t -> SHA1 (SHA1.feed t data)
-        | SHA224 t -> SHA224 (SHA224.feed t data)
-        | SHA256 t -> SHA256 (SHA256.feed t data)
-        | SHA384 t -> SHA384 (SHA384.feed t data)
-        | SHA512 t -> SHA512 (SHA512.feed t data)
-
-      let get t =
-        let open Mirage_crypto.Hash in
-        match t with
-        | MD5 t -> MD5.get t
-        | SHA1 t -> SHA1.get t
-        | SHA224 t -> SHA224.get t
-        | SHA256 t -> SHA256.get t
-        | SHA384 t -> SHA384.get t
-        | SHA512 t -> SHA512.get t
-    end
-
-    type 'a digests = {
-      md5 : Mirage_crypto.Hash.MD5.t;
-      sha256 : Mirage_crypto.Hash.SHA256.t;
-      sha512 : Mirage_crypto.Hash.SHA512.t;
-      csum : 'a Running_hash.t;
-    }
-
-    let empty_digests h =
-      let open Mirage_crypto.Hash in
-      {
-        md5 = MD5.empty;
-        sha256 = SHA256.empty;
-        sha512 = SHA512.empty;
-        csum = Running_hash.empty h;
-      }
-
-    let update_digests { md5; sha256; sha512; csum } data =
-      let open Mirage_crypto.Hash in
-      let data = Cstruct.of_string data in
-      {
-        md5 = MD5.feed md5 data;
-        sha256 = SHA256.feed sha256 data;
-        sha512 = SHA512.feed sha512 data;
-        csum = Running_hash.feed csum data;
-      }
-
-    let init_write csums =
-      let hash, csum = HM.max_binding csums in
-      (hash, csum), Ok (empty_digests hash, `Init)
-
     let content_length_of_string s =
       match Int64.of_string s with
       | len when len >= 0L -> `Fixed len
@@ -524,7 +419,7 @@ module Make
         (* We can't use hex because the filename would become too long for tar *)
         Mirage_kv.Key.(pending / hash_to_string hash / Base64.encode_string ~alphabet:Base64.uri_safe_alphabet ~pad:false csum)
       | _ ->
-        Mirage_kv.Key.(pending / hash_to_string hash / hex_to_string csum)
+        Mirage_kv.Key.(pending / hash_to_string hash / Ohex.encode csum)
 
     let to_delete_key (hash, csum) =
       let rand = "random" in (* FIXME: generate random string *)
@@ -534,7 +429,7 @@ module Make
           (* We can't use hex because the filename would become too long for tar *)
           Base64.encode_string ~alphabet:Base64.uri_safe_alphabet ~pad:false csum
         | _ ->
-          hex_to_string csum
+          Ohex.encode csum
       in
       Mirage_kv.Key.(to_delete / hash_to_string hash / (encoded_csum ^ "." ^ rand))
 
@@ -544,7 +439,7 @@ module Make
       let ( >>>= ) = Lwt_result.bind in
       fun response r data ->
         Lwt.return r >>>= fun (digests, acc) ->
-        let digests = update_digests digests data in
+        let digests = Archive_checksum.update_digests digests data in
         match acc with
         | `Init ->
           begin match body_length response with
@@ -570,17 +465,8 @@ module Make
         | `Unknown body ->
           Lwt.return_ok (digests, `Unknown (body ^ data))
 
-    let digests_to_hm digests =
-      HM.empty
-      |> HM.add `MD5
-        (Cstruct.to_string (Mirage_crypto.Hash.MD5.get digests.md5))
-      |> HM.add `SHA256
-        (Cstruct.to_string (Mirage_crypto.Hash.SHA256.get digests.sha256))
-      |> HM.add `SHA512
-        (Cstruct.to_string (Mirage_crypto.Hash.SHA512.get digests.sha512))
-
     let check_csums_digests csums digests =
-      let csums' = digests_to_hm digests in
+      let csums' = Archive_checksum.digests_to_hm digests in
       let common_bindings = List.filter (fun (h, _) -> HM.mem h csums) (HM.bindings csums') in
       List.length common_bindings > 0 &&
       List.for_all
@@ -596,9 +482,9 @@ module Make
       in
       let source = pending_key (hash, csum) in
       if check_csums_digests csums digests && sizes_match then
-        let sha256 = to_hex (Mirage_crypto.Hash.SHA256.get digests.sha256)
-        and md5 = to_hex (Mirage_crypto.Hash.MD5.get digests.md5)
-        and sha512 = to_hex (Mirage_crypto.Hash.SHA512.get digests.sha512) in
+        let sha256 = Ohex.encode Digestif.SHA256.(to_raw_string (get digests.sha256))
+        and md5 = Ohex.encode Digestif.MD5.(to_raw_string (get digests.md5))
+        and sha512 = Ohex.encode Digestif.SHA512.(to_raw_string (get digests.sha512)) in
         let dest = Mirage_kv.Key.v sha256 in
         begin match body with
         | `Unknown body ->
@@ -617,7 +503,7 @@ module Make
       else begin
         (if sizes_match then
            Logs.err (fun m -> m "Bad checksum %s: computed %s expected %s" url
-                        (hash_to_string hash) (hex_to_string csum))
+                        (hash_to_string hash) (Ohex.encode csum))
          else match body with
            | `Fixed_body (reported, actual) ->
              Logs.err (fun m -> m "Size mismatch %s: received %a bytes expected %Lu bytes"
@@ -681,15 +567,15 @@ module Make
               Logs.warn (fun m -> m "unexpected dictionary at %a" Mirage_kv.Key.pp path);
               Lwt.return_unit
             | `Value ->
-              let open Mirage_crypto.Hash in
+              let open Digestif in
               let sha256_final =
                 if verify_sha256 then
                   let f s =
-                    let digest = SHA256.get s in
-                    if not (String.equal (Mirage_kv.Key.basename path) (to_hex digest)) then
+                    let digest = SHA256.(to_raw_string (get s)) in
+                    if not (String.equal (Mirage_kv.Key.basename path) (Ohex.encode digest)) then
                       Logs.err (fun m -> m "corrupt SHA256 data for %a, \
                                             computed %s (should remove)"
-                                   Mirage_kv.Key.pp path (to_hex digest))
+                                   Mirage_kv.Key.pp path (Ohex.encode digest))
                   in
                   Some f
                 else
@@ -697,8 +583,8 @@ module Make
               and md5_final =
                 if not (SSet.mem (Mirage_kv.Key.basename path) md5s) then
                   let f s =
-                    let digest = MD5.get s in
-                    t.md5s <- SM.add (to_hex digest) (Mirage_kv.Key.basename path) t.md5s
+                    let digest = MD5.(to_raw_string (get s)) in
+                    t.md5s <- SM.add (Ohex.encode digest) (Mirage_kv.Key.basename path) t.md5s
                   in
                   Some f
                 else
@@ -706,8 +592,8 @@ module Make
               and sha512_final =
                 if not (SSet.mem (Mirage_kv.Key.basename path) sha512s) then
                   let f s =
-                    let digest = SHA512.get s in
-                    t.sha512s <- SM.add (to_hex digest) (Mirage_kv.Key.basename path) t.sha512s
+                    let digest = SHA512.(to_raw_string (get s)) in
+                    t.sha512s <- SM.add (Ohex.encode digest) (Mirage_kv.Key.basename path) t.sha512s
                   in
                   Some f
                 else
@@ -718,11 +604,10 @@ module Make
               | _ ->
                 read_chunked t `SHA256 path
                   (fun (sha256, md5, sha512) data ->
-                     let cs = Cstruct.of_string data in
                      Lwt.return
-                       (Option.map (fun t -> SHA256.feed t cs) sha256,
-                        Option.map (fun t -> MD5.feed t cs) md5,
-                        Option.map (fun t -> SHA512.feed t cs) sha512))
+                       (Option.map (fun t -> SHA256.feed_string t data) sha256,
+                        Option.map (fun t -> MD5.feed_string t data) md5,
+                        Option.map (fun t -> SHA512.feed_string t data) sha512))
                   (Option.map (fun _ -> SHA256.empty) sha256_final,
                    Option.map (fun _ -> MD5.empty) md5_final,
                    Option.map (fun _ -> SHA512.empty) sha512_final) >|= function
@@ -1083,7 +968,7 @@ stamp: %S
           incr idx;
           if !idx mod 10 = 0 then Gc.full_major () ;
           Logs.info (fun m -> m "downloading %s" url);
-          let quux, body_init = Disk.init_write csums in
+          let quux, body_init = Archive_checksum.init_write csums in
           Http_mirage_client.request http_client url (Disk.write_partial disk quux) body_init >>= function
           | Ok (resp, r) ->
             begin match r with

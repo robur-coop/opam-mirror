@@ -33,15 +33,16 @@ let mirror =
     ~packages:[
       package ~min:"0.3.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
-      package "hex" ;
+      package "ohex" ;
       package "httpaf" ;
       package ~max:"0.0.5" "git-kv" ;
       package ~min:"3.10.0" "git-paf" ;
       package "opam-file-format" ;
-      package ~min:"2.2.0" ~sublibs:[ "gz" ] "tar" ~pin:"git+https://github.com/mirage/ocaml-tar.git#4215ff02d87486ade54e1a3ede43cce476f791cf";
-      package ~min:"2.2.0" "tar-mirage" ~pin:"git+https://github.com/mirage/ocaml-tar.git#4215ff02d87486ade54e1a3ede43cce476f791cf" ;
+      package ~min:"3.0.0" ~sublibs:[ "gz" ] "tar" ;
+      package ~min:"3.0.0" "tar-mirage" ;
       package ~max:"0.2.0" "mirage-block-partition" ;
       package "oneffs" ;
+      package "digestif" ;
     ]
     (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> alpn_client @-> job)
 
