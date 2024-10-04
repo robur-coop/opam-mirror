@@ -67,7 +67,7 @@ module Make
   (_ : sig end)
   (HTTP : Http_mirage_client.S) = struct
 
-  module Part = Mirage_block_partition.Make(BLOCK)
+  module Part = Partitions.Make(BLOCK)
   module KV = Tar_mirage.Make_KV_RW(Pclock)(Part)
   module Cache = OneFFS.Make(Part)
   module Store = Git_kv.Make(Pclock)
@@ -985,18 +985,11 @@ stamp: %S
   module Paf = Paf_mirage.Make(Stack.TCP)
 
   let start block _time _pclock stack git_ctx http_ctx =
-    BLOCK.get_info block >>= fun info ->
-    let git_start =
-      let cache_size = Int64.(mul 2L (K.sectors_cache ())) in
-      Int64.(sub info.size_sectors (add cache_size (K.sectors_git ())))
-    in
-    Part.connect git_start block >>= fun (kv, rest) ->
-    let git_dump, rest = Part.subpartition (K.sectors_git ()) rest in
-    let md5s, sha512s = Part.subpartition (K.sectors_cache ()) rest in
-    KV.connect kv >>= fun kv ->
+    Part.connect block >>= fun { Part.tar ; git_dump; md5s ; sha512s } ->
+    KV.connect tar >>= fun kv ->
+    Cache.connect git_dump >>= fun git_dump ->
     Cache.connect md5s >>= fun md5s ->
     Cache.connect sha512s >>= fun sha512s ->
-    Cache.connect git_dump >>= fun git_dump ->
     Logs.info (fun m -> m "Available bytes in tar storage: %Ld" (KV.free kv));
     Disk.init ~verify_sha256:(K.verify_sha256 ()) kv md5s sha512s >>= fun disk ->
     let remote = K.remote () in
