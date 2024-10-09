@@ -693,7 +693,7 @@ module Make
           and size = String.length data in
           let hdr = Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
             (Mirage_kv.Key.to_string path) (Int64.of_int size) in
-          Some (None, hdr, once data)
+          Some (Some Tar.Header.Ustar, hdr, once data)
         | Error _ -> None in
       let entries = Lwt_stream.filter_map_s to_entry entries in
       Lwt.return begin fun () -> Tar.High (High.inj (Lwt_stream.get entries >|= Result.ok)) end
@@ -702,7 +702,7 @@ module Make
       let now = Ptime.v (Pclock.now_d_ps ()) in
       let mtime = Option.value ~default:0 Ptime.(Span.to_int_s (to_span now)) in
       entries_of_git ~mtime store repo >>= fun entries ->
-      let t = Tar.out entries in
+      let t = Tar.out ~level:Ustar entries in
       let t = Tar_gz.out_gzipped ~level:4 ~mtime:(Int32.of_int mtime) Gz.Unix t in
       let buf = Buffer.create 1024 in
       to_buffer buf t >|= function
