@@ -44,15 +44,20 @@ module K = struct
     Mirage_runtime.register_arg Arg.(value & opt int 80 doc)
 
   let sectors_cache =
-    let doc = "Number of sectors reserved for each checksum cache (md5, sha512)." in
+    let doc = "Number of sectors reserved for each checksum cache (md5, sha512). Only used with --initialize-disk." in
     let doc = Arg.info ~doc ["sectors-cache"] in
     Mirage_runtime.register_arg Arg.(value & opt int64 Int64.(mul 4L 2048L) doc)
 
   let sectors_git =
-    let doc = "Number of sectors reserved for git dump." in
+    let doc = "Number of sectors reserved for git dump. Only used with --initialize-disk" in
     let doc = Arg.info ~doc ["sectors-git"] in
     Mirage_runtime.register_arg Arg.(value & opt int64 Int64.(mul 40L (mul 2L 1024L)) doc)
 
+  let initialize_disk =
+    let doc = "Initialize the disk with a partition table. THIS IS DESTRUCTIVE!" in
+    let doc = Arg.info ~doc ["initialize-disk"] in
+    Mirage_runtime.register_arg Arg.(value & flag doc)
+  
   let ignore_local_git =
     let doc = "Ignore restoring locally saved git repository." in
     let doc = Arg.info ~doc ["ignore-local-git"] in
@@ -984,8 +989,7 @@ stamp: %S
 
   module Paf = Paf_mirage.Make(Stack.TCP)
 
-  let start block _time _pclock stack git_ctx http_ctx =
-    Part.connect block >>= fun { Part.tar ; git_dump; md5s ; sha512s } ->
+  let start_mirror { Part.tar; git_dump; md5s; sha512s } stack git_ctx http_ctx =
     KV.connect tar >>= fun kv ->
     Cache.connect git_dump >>= fun git_dump ->
     Cache.connect md5s >>= fun md5s ->
@@ -1036,4 +1040,21 @@ stamp: %S
           go ());
       download_archives (K.parallel_downloads ()) disk http_ctx git_kv >>= fun () ->
       (th >|= fun _v -> ())
+
+  let start block _time _pclock stack git_ctx http_ctx =
+    let initialize_disk = K.initialize_disk ()
+    and sectors_cache = K.sectors_cache ()
+    and sectors_git = K.sectors_git () in
+    if initialize_disk then
+      Part.format block ~sectors_cache ~sectors_git >>= function
+      | Ok () -> Lwt.return_unit
+      | Error `Msg e ->
+        Logs.err (fun m -> m "Error formatting disk: %s" e);
+        exit Mirage_runtime.argument_error
+      | Error `Block e ->
+        Logs.err (fun m -> m "Error formatting disk: %a" BLOCK.pp_write_error e);
+        exit 2
+    else
+      Part.connect block >>= fun parts ->
+      start_mirror parts stack git_ctx http_ctx
 end

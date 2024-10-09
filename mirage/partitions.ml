@@ -12,6 +12,20 @@ module Make(BLOCK : Mirage_block.S) = struct
     sha512s : Part.t ;
   }
 
+  (* I just made these ones up... *)
+  let tar_guid = Uuidm.of_string "53cd6812-46cc-474e-a141-30b3aed85f53" |> Option.get
+  let cache_guid = Uuidm.of_string "22ab9cf5-6e51-45c2-998a-862e23aab264" |> Option.get
+  let git_guid = Uuidm.of_string "30faa50a-4c9d-47ff-a1a5-ecfb3401c027" |> Option.get
+
+  (* GPT uses a 72 byte utf16be encoded string for partition names *)
+  let utf16be_of_ascii s =
+    String.init 72
+      (fun i ->
+         if i mod 2 = 0 && i / 2 < String.length s then
+           s.[i/2]
+         else
+           '\000')
+
   let read_partition_table info block =
     let b = Cstruct.create info.Mirage_block.sector_size in
     (* We will ignore the protective MBR at lba [0L] *)
@@ -38,14 +52,6 @@ module Make(BLOCK : Mirage_block.S) = struct
           | Ok gpt -> Lwt.return gpt
 
   let connect block =
-    let utf16be_of_ascii s =
-      String.init 72
-        (fun i ->
-           if i mod 2 = 0 && i / 2 < String.length s then
-             s.[i/2]
-           else
-             '\000')
-    in
     let* info = BLOCK.get_info block in
     let* gpt = read_partition_table info block in
     let tar, git_dump, md5s, sha512s =
@@ -88,4 +94,79 @@ module Make(BLOCK : Mirage_block.S) = struct
     let tar = get_part tar and git_dump = get_part git_dump
     and md5s = get_part md5s and sha512s = get_part sha512s in
     { tar ; git_dump ; md5s ; sha512s }
+
+  let format block ~sectors_cache ~sectors_git =
+    let* { size_sectors; sector_size; _ } = BLOCK.get_info block in
+    let ( let*? ) = Lwt_result.bind in
+    (* ocaml-gpt uses a fixed size partition entries table. Create an empty GPT
+       to figure out the first usable LBA *)
+    let empty =
+      Gpt.make ~sector_size ~disk_sectors:size_sectors []
+      |> Result.get_ok
+    in
+    let*? () =
+      if size_sectors <
+         (* protective MBR + GPT header + GPT table *)
+         let ( + ) = Int64.add in
+         empty.first_usable_lba +
+         min 1L (Int64.of_int (2 * Tar.Header.length / sector_size)) + sectors_cache + sectors_cache + sectors_git
+         + 1L (* backup GPT header *) then
+        Lwt.return_error (`Msg "too small disk")
+      else Lwt_result.return ()
+    in
+    let gpt =
+      let partitions =
+        (* Current implementation of [Gpt.Partition.make] only returns [Ok _] or
+           raises [Invalid_argument _] :/ *)
+        let attributes = 1L in
+        let sha512s =
+          Gpt.Partition.make
+            ~name:(utf16be_of_ascii "sha512s")
+            ~type_guid:cache_guid
+            ~attributes
+            Int64.(succ (sub empty.last_usable_lba sectors_cache))
+            empty.last_usable_lba
+          |> Result.get_ok
+        in
+        let md5s =
+          Gpt.Partition.make
+            ~name:(utf16be_of_ascii "md5s")
+            ~type_guid:cache_guid
+            ~attributes
+            (Int64.sub sha512s.starting_lba sectors_cache)
+            (Int64.pred sha512s.starting_lba)
+          |> Result.get_ok
+        in
+        let git_dump =
+          Gpt.Partition.make
+            ~name:(utf16be_of_ascii "git_dump")
+            ~type_guid:git_guid
+            ~attributes
+            (Int64.sub md5s.starting_lba sectors_git)
+            (Int64.pred md5s.starting_lba)
+          |> Result.get_ok
+        in
+        let tar =
+          Gpt.Partition.make
+            ~name:(utf16be_of_ascii "tar")
+            ~type_guid:tar_guid
+            ~attributes
+            empty.first_usable_lba
+            (Int64.pred git_dump.starting_lba)
+          |> Result.get_ok
+        in
+        [ tar; git_dump; md5s; sha512s ]
+      in
+      Gpt.make ~sector_size ~disk_sectors:size_sectors partitions
+      |> Result.get_ok
+    in
+  let buf =
+    Cstruct.create (sector_size * (Int64.to_int gpt.first_usable_lba + 2 * Tar.Header.length))
+  in
+    Gptar.marshal_header ~sector_size buf gpt;
+    Gpt.marshal_partition_table ~sector_size
+      (Cstruct.shift buf (sector_size * Int64.to_int gpt.partition_entry_lba))
+    gpt;
+    BLOCK.write block 0L [ buf ]
+    |> Lwt_result.map_error (fun e -> `Block e)
 end
