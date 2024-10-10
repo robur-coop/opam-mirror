@@ -114,47 +114,47 @@ module Make(BLOCK : Mirage_block.S) = struct
         Lwt.return_error (`Msg "too small disk")
       else Lwt_result.return ()
     in
+    (* Current implementation of [Gpt.Partition.make] only returns [Ok _] or
+       raises [Invalid_argument _] :/ *)
+    let attributes = 1L in
+    let sha512s =
+      Gpt.Partition.make
+        ~name:(utf16be_of_ascii "sha512s")
+        ~type_guid:cache_guid
+        ~attributes
+        Int64.(succ (sub empty.last_usable_lba sectors_cache))
+        empty.last_usable_lba
+      |> Result.get_ok
+    in
+    let md5s =
+      Gpt.Partition.make
+        ~name:(utf16be_of_ascii "md5s")
+        ~type_guid:cache_guid
+        ~attributes
+        (Int64.sub sha512s.starting_lba sectors_cache)
+        (Int64.pred sha512s.starting_lba)
+      |> Result.get_ok
+    in
+    let git_dump =
+      Gpt.Partition.make
+        ~name:(utf16be_of_ascii "git_dump")
+        ~type_guid:git_guid
+        ~attributes
+        (Int64.sub md5s.starting_lba sectors_git)
+        (Int64.pred md5s.starting_lba)
+      |> Result.get_ok
+    in
+    let tar =
+      Gpt.Partition.make
+        ~name:(utf16be_of_ascii "tar")
+        ~type_guid:tar_guid
+        ~attributes
+        empty.first_usable_lba
+        (Int64.pred git_dump.starting_lba)
+      |> Result.get_ok
+    in
     let gpt =
       let partitions =
-        (* Current implementation of [Gpt.Partition.make] only returns [Ok _] or
-           raises [Invalid_argument _] :/ *)
-        let attributes = 1L in
-        let sha512s =
-          Gpt.Partition.make
-            ~name:(utf16be_of_ascii "sha512s")
-            ~type_guid:cache_guid
-            ~attributes
-            Int64.(succ (sub empty.last_usable_lba sectors_cache))
-            empty.last_usable_lba
-          |> Result.get_ok
-        in
-        let md5s =
-          Gpt.Partition.make
-            ~name:(utf16be_of_ascii "md5s")
-            ~type_guid:cache_guid
-            ~attributes
-            (Int64.sub sha512s.starting_lba sectors_cache)
-            (Int64.pred sha512s.starting_lba)
-          |> Result.get_ok
-        in
-        let git_dump =
-          Gpt.Partition.make
-            ~name:(utf16be_of_ascii "git_dump")
-            ~type_guid:git_guid
-            ~attributes
-            (Int64.sub md5s.starting_lba sectors_git)
-            (Int64.pred md5s.starting_lba)
-          |> Result.get_ok
-        in
-        let tar =
-          Gpt.Partition.make
-            ~name:(utf16be_of_ascii "tar")
-            ~type_guid:tar_guid
-            ~attributes
-            empty.first_usable_lba
-            (Int64.pred git_dump.starting_lba)
-          |> Result.get_ok
-        in
         [ tar; git_dump; md5s; sha512s ]
       in
       Gpt.make ~sector_size ~disk_sectors:size_sectors partitions
@@ -167,6 +167,23 @@ module Make(BLOCK : Mirage_block.S) = struct
     Gpt.marshal_partition_table ~sector_size
       (Cstruct.shift buf (sector_size * Int64.to_int gpt.partition_entry_lba))
     gpt;
-    BLOCK.write block 0L [ buf ]
-    |> Lwt_result.map_error (fun e -> `Block e)
+    let write block sector_start buffers =
+      BLOCK.write block sector_start buffers
+      |> Lwt_result.map_error (fun e -> `Block e)
+    in
+    let*? () =
+      write block 0L [ buf ]
+    in
+    (* Format the file systems by writing zeroes *)
+    let zeroes = Cstruct.create (max (2 * Tar.Header.length) sector_size) in
+    let*? () =
+      write block tar.starting_lba [ Cstruct.sub zeroes 0 (2 * Tar.Header.length) ]
+    in
+    let*? () =
+      write block git_dump.starting_lba [ Cstruct.sub zeroes 0 sector_size ]
+    in
+    let*? () =
+      write block md5s.starting_lba [ Cstruct.sub zeroes 0 sector_size ]
+    in
+    write block sha512s.starting_lba [ Cstruct.sub zeroes 0 sector_size ]
 end
