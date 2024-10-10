@@ -175,15 +175,23 @@ module Make(BLOCK : Mirage_block.S) = struct
       write block 0L [ buf ]
     in
     (* Format the file systems by writing zeroes *)
-    let zeroes = Cstruct.create (max (2 * Tar.Header.length) sector_size) in
+    (* For tar we need to zero (at least) the first 2*512 bytes so we round up
+       to the nearest sector alignment *)
+    let zeroes =
+      let sectors =
+        (2 * Tar.Header.length + sector_size - 1) / sector_size * sector_size
+      in
+      Cstruct.create sectors in
     let*? () =
-      write block tar.starting_lba [ Cstruct.sub zeroes 0 (2 * Tar.Header.length) ]
+      write block tar.starting_lba [ zeroes ]
+    in
+    (* For the OneFFS filesystems we just need to zero out the first sector *)
+    let zero_sector = Cstruct.create sector_size in
+    let*? () =
+      write block git_dump.starting_lba [ zero_sector ]
     in
     let*? () =
-      write block git_dump.starting_lba [ Cstruct.sub zeroes 0 sector_size ]
+      write block md5s.starting_lba [ zero_sector ]
     in
-    let*? () =
-      write block md5s.starting_lba [ Cstruct.sub zeroes 0 sector_size ]
-    in
-    write block sha512s.starting_lba [ Cstruct.sub zeroes 0 sector_size ]
+    write block sha512s.starting_lba [ zero_sector ]
 end
