@@ -1047,7 +1047,9 @@ stamp: %S
     and sectors_git = K.sectors_git () in
     if initialize_disk then
       Part.format block ~sectors_cache ~sectors_git >>= function
-      | Ok () -> Lwt.return_unit
+      | Ok () ->
+        Logs.app (fun m -> m "Successfully initialized the disk! You may restart now without --initialize-disk.");
+        Lwt.return_unit
       | Error `Msg e ->
         Logs.err (fun m -> m "Error formatting disk: %s" e);
         exit Mirage_runtime.argument_error
