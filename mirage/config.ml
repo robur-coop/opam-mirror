@@ -1,35 +1,8 @@
+(* mirage >= 4.8.0 & < 4.9.0 *)
 open Mirage
-
-let setup = runtime_arg ~pos:__POS__ "Unikernel.K.setup"
-
-let ssh_key =
-  Runtime_arg.create ~pos:__POS__
-    {|let open Cmdliner in
-      let doc = Arg.info ~doc:"The private SSH key (rsa:<seed> or ed25519:<b64-key>)." ["ssh-key"] in
-      Arg.(value & opt (some string) None doc)|}
-
-let ssh_authenticator =
-  Runtime_arg.create ~pos:__POS__
-    {|let open Cmdliner in
-      let doc = Arg.info ~doc:"SSH authenticator." ["ssh-auth"] in
-      Arg.(value & opt (some string) None doc)|}
-
-let ssh_password =
-  Runtime_arg.create ~pos:__POS__
-    {|let open Cmdliner in
-      let doc = Arg.info ~doc:"The private SSH password." [ "ssh-password" ] in
-      Arg.(value & opt (some string) None doc)|}
-
-let tls_authenticator =
-  Runtime_arg.create ~pos:__POS__
-    {|let open Cmdliner in
-      let doc = "TLS host authenticator. See git_http in lib/mirage/mirage.mli for a description of the format." in
-      let doc = Arg.info ~doc ["tls-authenticator"] in
-      Arg.(value & opt (some string) None doc)|}
 
 let mirror =
   main "Unikernel.Make"
-    ~runtime_args:[ setup ]
     ~packages:[
       package ~min:"0.3.0" ~sublibs:[ "mirage" ] "paf" ;
       package "h2" ;
@@ -54,9 +27,9 @@ let block = block_of_file "tar"
 
 let git_client, alpn_client =
   let git = mimic_happy_eyeballs stack he dns in
-  merge_git_clients (git_ssh ~key:ssh_key ~authenticator:ssh_authenticator ~password:ssh_password tcp git)
+  merge_git_clients (git_ssh tcp git)
     (merge_git_clients (git_tcp tcp git)
-      (git_http ~authenticator:tls_authenticator tcp git)),
+      (git_http tcp git)),
   paf_client tcp (mimic_happy_eyeballs stack he dns)
 
 let () = register "mirror"

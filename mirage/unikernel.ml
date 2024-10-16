@@ -7,83 +7,56 @@ module K = struct
 
   let check =
     let doc = Arg.info ~doc:"Only check the cache" ["check"] in
-    Arg.(value & flag doc)
-  
+    Mirage_runtime.register_arg Arg.(value & flag doc)
+
   let verify_sha256 =
     let doc = Arg.info
       ~doc:"Verify the SHA256 checksums of the cache contents, and \
             re-build the other checksum caches."
       ["verify-sha256"]
     in
-    Arg.(value & flag doc)
-  
+    Mirage_runtime.register_arg Arg.(value & flag doc)
+
   let remote =
     let doc = Arg.info
       ~doc:"Remote repository url, use suffix #foo to specify a branch 'foo': \
             https://github.com/ocaml/opam-repository.git"
       ["remote"]
     in
-    Arg.(value & opt string "https://github.com/ocaml/opam-repository.git#master" doc)
-  
+    Mirage_runtime.register_arg
+      Arg.(value & opt string "https://github.com/ocaml/opam-repository.git#master" doc)
+
   let parallel_downloads =
     let doc = Arg.info
         ~doc:"Amount of parallel HTTP downloads"
         ["parallel-downloads"]
     in
-    Arg.(value & opt int 20 doc)
-  
+    Mirage_runtime.register_arg Arg.(value & opt int 20 doc)
+
   let hook_url =
     let doc = Arg.info
         ~doc:"URL to conduct an update of the git repository" ["hook-url"]
     in
-    Arg.(value & opt string "update" doc)
-  
+    Mirage_runtime.register_arg Arg.(value & opt string "update" doc)
+
   let port =
     let doc = Arg.info ~doc:"HTTP listen port." ["port"] in
-    Arg.(value & opt int 80 doc)
-  
+    Mirage_runtime.register_arg Arg.(value & opt int 80 doc)
+
   let sectors_cache =
     let doc = "Number of sectors reserved for each checksum cache (md5, sha512)." in
     let doc = Arg.info ~doc ["sectors-cache"] in
-    Arg.(value & opt int64 Int64.(mul 4L 2048L) doc)
-  
+    Mirage_runtime.register_arg Arg.(value & opt int64 Int64.(mul 4L 2048L) doc)
+
   let sectors_git =
     let doc = "Number of sectors reserved for git dump." in
     let doc = Arg.info ~doc ["sectors-git"] in
-    Arg.(value & opt int64 Int64.(mul 40L (mul 2L 1024L)) doc)
-  
+    Mirage_runtime.register_arg Arg.(value & opt int64 Int64.(mul 40L (mul 2L 1024L)) doc)
+
   let ignore_local_git =
     let doc = "Ignore restoring locally saved git repository." in
     let doc = Arg.info ~doc ["ignore-local-git"] in
-    Arg.(value & flag doc)
-
-  type t =
-    { check : bool
-    ; verify_sha256 : bool
-    ; remote : string
-    ; parallel_downloads : int
-    ; hook_url : string
-    ; port : int
-    ; sectors_cache : int64
-    ; sectors_git : int64
-    ; ignore_local_git : bool }
-
-  let v check verify_sha256 remote parallel_downloads hook_url port
-    sectors_cache sectors_git ignore_local_git =
-    { check; verify_sha256; remote; parallel_downloads; hook_url; port
-    ; sectors_cache; sectors_git; ignore_local_git }
-
-  let setup =
-    Term.(const v
-          $ check
-          $ verify_sha256
-          $ remote
-          $ parallel_downloads
-          $ hook_url
-          $ port
-          $ sectors_cache
-          $ sectors_git
-          $ ignore_local_git)
+    Mirage_runtime.register_arg Arg.(value & flag doc)
 end
 
 module Make
@@ -363,7 +336,7 @@ module Make
 
     (*
     module HM_running = struct
-      
+
       let empty h =
         let module H = (val Mirage_crypto.Hash.module_of h) in
         (* We need MD5, SHA256 and SHA512. [h] is likely one of the
@@ -1011,29 +984,28 @@ stamp: %S
 
   module Paf = Paf_mirage.Make(Stack.TCP)
 
-  let start block _time _pclock stack git_ctx http_ctx
-    { K.check; verify_sha256; remote; parallel_downloads; hook_url
-    ; port; sectors_cache; sectors_git; ignore_local_git } =
+  let start block _time _pclock stack git_ctx http_ctx =
     BLOCK.get_info block >>= fun info ->
     let git_start =
-      let cache_size = Int64.(mul 2L sectors_cache) in
-      Int64.(sub info.size_sectors (add cache_size sectors_git))
+      let cache_size = Int64.(mul 2L (K.sectors_cache ())) in
+      Int64.(sub info.size_sectors (add cache_size (K.sectors_git ())))
     in
     Part.connect git_start block >>= fun (kv, rest) ->
-    let git_dump, rest = Part.subpartition sectors_git rest in
-    let md5s, sha512s = Part.subpartition sectors_cache rest in
+    let git_dump, rest = Part.subpartition (K.sectors_git ()) rest in
+    let md5s, sha512s = Part.subpartition (K.sectors_cache ()) rest in
     KV.connect kv >>= fun kv ->
     Cache.connect md5s >>= fun md5s ->
     Cache.connect sha512s >>= fun sha512s ->
     Cache.connect git_dump >>= fun git_dump ->
     Logs.info (fun m -> m "Available bytes in tar storage: %Ld" (KV.free kv));
-    Disk.init ~verify_sha256 kv md5s sha512s >>= fun disk ->
-    if check then
+    Disk.init ~verify_sha256:(K.verify_sha256 ()) kv md5s sha512s >>= fun disk ->
+    let remote = K.remote () in
+    if K.check () then
       Lwt.return_unit
     else
       begin
         Logs.info (fun m -> m "Initializing git state. This may take a while...");
-        (if ignore_local_git then
+        (if K.ignore_local_git () then
            Lwt.return (Error ())
          else
            restore_git ~remote git_dump git_ctx) >>= function
@@ -1047,21 +1019,21 @@ stamp: %S
       Serve.commit_id git_kv >>= fun commit_id ->
       Logs.info (fun m -> m "git: %s" commit_id);
       Serve.create remote git_kv >>= fun serve ->
-      Paf.init ~port (Stack.tcp stack) >>= fun t ->
+      Paf.init ~port:(K.port ()) (Stack.tcp stack) >>= fun t ->
       let update () =
         Serve.update_git ~remote serve git_kv >>= function
         | None | Some [] -> Lwt.return_unit
         | Some _changes ->
           dump_git git_dump git_kv >>= fun () ->
-          download_archives parallel_downloads disk http_ctx git_kv
+          download_archives (K.parallel_downloads ()) disk http_ctx git_kv
       in
       let service =
         Paf.http_service
           ~error_handler:(fun _ ?request:_ _ _ -> ())
-          (Serve.dispatch serve disk hook_url update)
+          (Serve.dispatch serve disk (K.hook_url ()) update)
       in
       let `Initialized th = Paf.serve service t in
-      Logs.info (fun f -> f "listening on %d/HTTP" port);
+      Logs.info (fun f -> f "listening on %d/HTTP" (K.port ()));
       Lwt.async (fun () ->
           let rec go () =
             Time.sleep_ns (Duration.of_hour 1) >>= fun () ->
@@ -1069,6 +1041,6 @@ stamp: %S
             go ()
           in
           go ());
-      download_archives parallel_downloads disk http_ctx git_kv >>= fun () ->
+      download_archives (K.parallel_downloads ()) disk http_ctx git_kv >>= fun () ->
       (th >|= fun _v -> ())
 end
