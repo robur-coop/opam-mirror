@@ -156,7 +156,7 @@ module Make
           opamfile.file_contents
       in
       if unavailable then
-        (Logs.info (fun m -> m "%s is marked unavailable, skipping" filename);
+        (Logs.debug (fun m -> m "%s is marked unavailable, skipping" filename);
          None)
       else
       let url_section =
