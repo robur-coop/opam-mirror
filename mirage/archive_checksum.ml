@@ -62,3 +62,8 @@ let digests_to_hm digests =
     Digestif.SHA256.(to_raw_string (get digests.sha256))
   |> HM.add `SHA512
     Digestif.SHA512.(to_raw_string (get digests.sha512))
+
+let get digests = function
+  | `MD5 -> Digestif.MD5.(to_raw_string (get digests.md5))
+  | `SHA256 -> Digestif.SHA256.(to_raw_string (get digests.sha256))
+  | `SHA512 -> Digestif.SHA512.(to_raw_string (get digests.sha512))
