@@ -480,8 +480,10 @@ module Make
           Logs.err (fun m -> m "Write failure for %s: %a" url KV.pp_write_error e)
       else begin
         (if sizes_match then
-           Logs.err (fun m -> m "Bad checksum %s: computed %s expected %s" url
-                        (hash_to_string hash) (Ohex.encode csum))
+           Logs.err (fun m -> m "Bad checksum %s:%s: computed %s expected %s" url
+                        (hash_to_string hash)
+                        (Archive_checksum.get digests hash)
+                        (Ohex.encode csum))
          else match body with
            | `Fixed_body (reported, actual) ->
              Logs.err (fun m -> m "Size mismatch %s: received %a bytes expected %Lu bytes"
