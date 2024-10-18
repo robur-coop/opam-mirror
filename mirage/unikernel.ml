@@ -957,8 +957,10 @@ stamp: %S
                               url H2.Status.pp_hum resp.status resp.reason);
                 Lwt.return_unit
               | Error `Write_error e ->
-                Logs.err (fun m -> m "%s: write error %a"
-                              url KV.pp_write_error e);
+                Logs.err (fun m -> m "%s: write error %a %a"
+                              url
+                              Mirage_kv.Key.pp (Disk.pending_key quux)
+                              KV.pp_write_error e);
                 Lwt.return_unit
               | Ok (digests, body) ->
                 Disk.finalize_write disk quux ~url body csums digests
