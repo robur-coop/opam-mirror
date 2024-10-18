@@ -482,7 +482,7 @@ module Make
         (if sizes_match then
            Logs.err (fun m -> m "Bad checksum %s:%s: computed %s expected %s" url
                         (hash_to_string hash)
-                        (Archive_checksum.get digests hash)
+                        (Ohex.encode (Archive_checksum.get digests hash))
                         (Ohex.encode csum))
          else match body with
            | `Fixed_body (reported, actual) ->
