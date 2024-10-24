@@ -129,7 +129,7 @@ module Make
             (* TODO report parser errors *)
             (try
                let url_csums = Opam_file.extract_urls (Mirage_kv.Key.to_string path) data in
-               Option.fold ~none:acc ~some:(fun (url, csums) ->
+               List.fold_left (fun acc (url, csums) ->
                    if HM.cardinal csums = 0 then
                      (Logs.warn (fun m -> m "no checksums for %s, ignoring" url); acc)
                    else
@@ -146,7 +146,7 @@ module Make
                              Logs.warn (fun m -> m "mismatching hashes for %s: %s vs %s"
                                            url (hm_to_s csums') (hm_to_s csums));
                              None
-                           end) acc) url_csums
+                           end) acc) acc url_csums
              with _ ->
                Logs.warn (fun m -> m "some error in %a, ignoring" Mirage_kv.Key.pp path);
                acc)

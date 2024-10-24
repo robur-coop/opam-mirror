@@ -82,6 +82,25 @@ let extract_url_checksum filename items =
   | Some url, Some cs -> Some (url, cs)
   | _ -> None
 
+let extract_checksums_and_urls filename opam =
+  let open OpamParserTypes.FullPos in
+  List.fold_left (fun acc ->
+      function
+      | { pelem = Section ({ section_kind = { pelem = "url" ; _ } ; section_items = { pelem = items ; _ } ; _ }) ; _} ->
+        begin match extract_url_checksum filename items with
+          | None -> acc
+          | Some url -> url :: acc
+        end
+      | { pelem = Section ({ section_kind = { pelem = "extra-source" ; _ } ; section_name = Some { pelem ; _ } ;  section_items = { pelem = items ; _ };  _ }) ; _} ->
+        begin
+          Log.debug (fun m -> m "extracting for extra-source %s in %s" filename pelem);
+          match extract_url_checksum filename items with
+          | None -> acc
+          | Some url -> url :: acc
+        end
+      | _ -> acc)
+    [] opam.file_contents
+
 let extract_urls filename str =
   (* in an opam file, there may be:
      url { src: <string> checksum: [ STRING ] } <- list of hash
@@ -102,13 +121,6 @@ let extract_urls filename str =
   in
   if unavailable then
     (Log.debug (fun m -> m "%s is marked unavailable, skipping" filename);
-     None)
+     [])
   else
-    match
-      List.find_opt (function
-          | { pelem = Section ({ section_kind = { pelem = "url" ; _ } ; _ }) ; _} -> true | _ -> false)
-        opamfile.file_contents
-    with
-    | Some { pelem = Section ({ section_items = { pelem = items ; _ }; _}) ; _ } ->
-      extract_url_checksum filename items
-    | _ -> Log.debug (fun m -> m "no url section for %s" filename); None
+    extract_checksums_and_urls filename opamfile
