@@ -729,8 +729,11 @@ stamp: %S
          - list of current downloads
          - list of failed downloads
       *)
-      let hashes = SM.cardinal disk.Disk.md5s in
-      let archive_stats = Printf.sprintf "%u validated archives on disk" hashes in
+      let archive_stats =
+        Fmt.str "<ul><li>%u validated archives on disk</li><li>%Lu bytes free</li></ul>"
+          (SM.cardinal disk.Disk.md5s)
+          (KV.free disk.Disk.dev)
+      in
       let active_downloads =
         let header = "<h2>Active downloads</h2><ul>" in
         let content =
