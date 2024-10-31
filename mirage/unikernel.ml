@@ -750,7 +750,7 @@ stamp: %S
         in
         header ^ content ^ "</ul>"
       in
-      "<html><head><title>Opam-mirror status page</title></head><body><h1>Opam mirror status></h1><div>"
+      "<html><head><title>Opam-mirror status page</title></head><body><h1>Opam mirror status</h1><div>"
       ^ String.concat "</div><div>" [ archive_stats ; active_downloads ; failed_downloads ]
         ^ "</div></body></html>"
 
@@ -946,7 +946,10 @@ stamp: %S
               | Ok (digests, body) ->
                 Disk.finalize_write disk quux ~url body csums digests
             end
-          | _ -> Lwt.return_unit)
+          | Error me ->
+            add_failed url (Ptime.v (Pclock.now_d_ps ()))
+              (Fmt.str "mimic error: %a" Mimic.pp_error me);
+            Lwt.return_unit)
       (SM.bindings urls) >>= fun () ->
     Disk.update_caches disk >|= fun () ->
     Logs.info (fun m -> m "downloading of %d urls done" (SM.cardinal urls))
