@@ -18,6 +18,7 @@ let mirror =
       package "gptar" ;
       package "oneffs" ;
       package "digestif" ;
+      package "swapfs" ;
     ]
     (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> alpn_client @-> job)
 

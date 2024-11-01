@@ -7,12 +7,14 @@ module Make(BLOCK : Mirage_block.S) = struct
 
   type partitions = {
     tar : Part.t ;
+    swap : Part.t ;
     git_dump : Part.t ;
     md5s : Part.t ;
     sha512s : Part.t ;
   }
 
   (* I just made these ones up... *)
+  let swap_guid = Uuidm.of_string "76515dc1-953f-4c59-8b41-90011bdddfcd" |> Option.get
   let tar_guid = Uuidm.of_string "53cd6812-46cc-474e-a141-30b3aed85f53" |> Option.get
   let cache_guid = Uuidm.of_string "22ab9cf5-6e51-45c2-998a-862e23aab264" |> Option.get
   let git_guid = Uuidm.of_string "30faa50a-4c9d-47ff-a1a5-ecfb3401c027" |> Option.get
@@ -54,33 +56,37 @@ module Make(BLOCK : Mirage_block.S) = struct
   let connect block =
     let* info = BLOCK.get_info block in
     let* gpt = read_partition_table info block in
-    let tar, git_dump, md5s, sha512s =
+    let tar, swap, git_dump, md5s, sha512s =
       match
         List.fold_left
-          (fun (tar, git_dump, md5s, sha512s) p ->
+          (fun (tar, swap, git_dump, md5s, sha512s) p ->
              if String.equal p.Gpt.Partition.name
                  (utf16be_of_ascii "tar")
              then
-               (Some p, git_dump, md5s, sha512s)
+               (Some p, swap, git_dump, md5s, sha512s)
              else if String.equal p.name
                  (utf16be_of_ascii "git_dump")
              then
-               (tar, Some p, md5s, sha512s)
+               (tar, swap, Some p, md5s, sha512s)
              else if String.equal p.name
                  (utf16be_of_ascii "md5s")
              then
-               (tar, git_dump, Some p, sha512s)
+               (tar, swap, git_dump, Some p, sha512s)
              else if String.equal p.name
                  (utf16be_of_ascii "sha512s")
              then
-               (tar, git_dump, md5s, Some p)
+               (tar, swap, git_dump, md5s, Some p)
+             else if String.equal p.name
+                 (utf16be_of_ascii "swap")
+             then
+               (tar, Some p, git_dump, md5s, sha512s)
              else
                Format.kasprintf failwith "Unknown partition %S" p.name)
-          (None, None, None, None)
+          (None, None, None, None, None)
           gpt.partitions
       with
-      | (Some tar, Some git_dump, Some md5s, Some sha512s) ->
-        (tar, git_dump, md5s, sha512s)
+      | (Some tar, Some swap, Some git_dump, Some md5s, Some sha512s) ->
+        (tar, swap, git_dump, md5s, sha512s)
       | _ ->
         failwith "not all partitions found :("
     in
@@ -91,11 +97,11 @@ module Make(BLOCK : Mirage_block.S) = struct
       let (part, _after) = Part.subpartition len after in
       part
     in
-    let tar = get_part tar and git_dump = get_part git_dump
+    let tar = get_part tar and swap = get_part swap and git_dump = get_part git_dump
     and md5s = get_part md5s and sha512s = get_part sha512s in
-    { tar ; git_dump ; md5s ; sha512s }
+    { tar ; swap; git_dump ; md5s ; sha512s }
 
-  let format block ~sectors_cache ~sectors_git =
+  let format block ~sectors_cache ~sectors_git ~sectors_swap =
     let* { size_sectors; sector_size; _ } = BLOCK.get_info block in
     let ( let*? ) = Lwt_result.bind in
     (* ocaml-gpt uses a fixed size partition entries table. Create an empty GPT
@@ -144,18 +150,27 @@ module Make(BLOCK : Mirage_block.S) = struct
         (Int64.pred md5s.starting_lba)
       |> Result.get_ok
     in
+    let swap =
+      Gpt.Partition.make
+        ~name:(utf16be_of_ascii "swap")
+        ~type_guid:swap_guid
+        ~attributes
+        (Int64.sub git_dump.starting_lba sectors_swap)
+        (Int64.pred git_dump.starting_lba)
+      |> Result.get_ok
+    in
     let tar =
       Gpt.Partition.make
         ~name:(utf16be_of_ascii "tar")
         ~type_guid:tar_guid
         ~attributes
         empty.first_usable_lba
-        (Int64.pred git_dump.starting_lba)
+        (Int64.pred swap.starting_lba)
       |> Result.get_ok
     in
     let gpt =
       let partitions =
-        [ tar; git_dump; md5s; sha512s ]
+        [ tar; swap; git_dump; md5s; sha512s ]
       in
       Gpt.make ~sector_size ~disk_sectors:size_sectors partitions
       |> Result.get_ok
