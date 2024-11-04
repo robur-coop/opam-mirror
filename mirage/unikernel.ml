@@ -101,6 +101,11 @@ module Make
         hash_to_string h ^ "=" ^ Ohex.encode v ^ "\n" ^ acc)
       hm ""
 
+  let parse_errors = ref SM.empty
+
+  let add_parse_error filename error =
+    parse_errors := SM.add filename error !parse_errors
+
   module Git = struct
     let contents store =
       let explore = ref [ Mirage_kv.Key.empty ] in
@@ -135,31 +140,32 @@ module Make
 
     let find_urls acc path data =
       if Mirage_kv.Key.basename path = "opam" then
-        (* TODO: parser errors are logged (should be reported to status page) *)
-        (try
-           let url_csums = Opam_file.extract_urls (Mirage_kv.Key.to_string path) data in
-           List.fold_left (fun acc (url, csums) ->
-               if HM.cardinal csums = 0 then
-                 (Logs.warn (fun m -> m "no checksums for %s, ignoring" url); acc)
-               else
-                 SM.update url (function
-                     | None -> Some csums
-                     | Some csums' ->
-                       if HM.for_all (fun h v ->
-                           match HM.find_opt h csums with
-                           | None -> true | Some v' -> String.equal v v')
-                           csums'
-                       then
-                         Some (HM.union (fun _h v _v' -> Some v) csums csums')
-                       else begin
-                         Logs.warn (fun m -> m "mismatching hashes for %s: %s vs %s"
-                                       url (hm_to_s csums') (hm_to_s csums));
-                         None
-                       end) acc) acc url_csums
-         with exn ->
-           Logs.warn (fun m -> m "some error in %a, ignoring %s"
-                         Mirage_kv.Key.pp path (Printexc.to_string exn));
-           acc)
+        let path = Mirage_kv.Key.to_string path in
+        let url_csums, errs = Opam_file.extract_urls path data in
+        List.iter (fun (`Msg msg) -> add_parse_error path msg) errs;
+        List.fold_left (fun acc (url, csums) ->
+            if HM.cardinal csums = 0 then
+              (Logs.warn (fun m -> m "no checksums for %s, ignoring" url);
+               add_parse_error path ("no checksums for " ^ url);
+               acc)
+            else
+              SM.update url (function
+                  | None -> Some csums
+                  | Some csums' ->
+                    if HM.for_all (fun h v ->
+                        match HM.find_opt h csums with
+                        | None -> true | Some v' -> String.equal v v')
+                        csums'
+                    then
+                      Some (HM.union (fun _h v _v' -> Some v) csums csums')
+                    else begin
+                      Logs.warn (fun m -> m "mismatching hashes for %s: %s vs %s"
+                                    url (hm_to_s csums') (hm_to_s csums));
+                      add_parse_error path (Fmt.str
+                                              "mismatching hashes for %s: %s vs %s"
+                                              url (hm_to_s csums') (hm_to_s csums));
+                      None
+                    end) acc) acc url_csums
       else
         acc
 
@@ -654,27 +660,37 @@ stamp: %S
           (SM.cardinal disk.Disk.md5s)
           (KV.free disk.Disk.dev)
       in
+      let sort_by_ts a b = Ptime.compare a b in
       let active_downloads =
         let header = "<h2>Active downloads</h2><ul>" in
         let content =
-          SM.fold (fun url (ts, bytes_written) acc ->
-              ("<li>" ^ Ptime.to_rfc3339 ?tz_offset_s:None ts ^ ": " ^ url ^ " " ^ string_of_int bytes_written ^ " bytes written to disk</li>")
-              ^ acc)
-            !active_downloads ""
+          SM.bindings !active_downloads |>
+          List.sort (fun (_, (a, _)) (_, (b, _)) -> sort_by_ts a b) |>
+          List.map (fun (url, (ts, bytes_written)) ->
+              "<li>" ^ Ptime.to_rfc3339 ?tz_offset_s:None ts ^ ": " ^ url ^ " " ^ string_of_int bytes_written ^ " bytes written to swap</li>")
         in
-        header ^ content ^ "</ul>"
+        header ^ String.concat "" content ^ "</ul>"
       and failed_downloads =
         let header = "<h2>Failed downloads</h2><ul>" in
         let content =
-          SM.fold (fun url (ts, reason) acc ->
-              ("<li>" ^ Ptime.to_rfc3339 ?tz_offset_s:None ts ^ ": " ^ url ^ " " ^ reason ^ "</li>")
-              ^ acc)
-            !failed_downloads ""
+          SM.bindings !failed_downloads |>
+          List.sort (fun (_, (a, _)) (_, (b, _)) -> sort_by_ts a b) |>
+          List.map (fun (url, (ts, reason)) ->
+              "<li>" ^ Ptime.to_rfc3339 ?tz_offset_s:None ts ^ ": " ^ url ^ " " ^ reason ^ "</li>")
         in
-        header ^ content ^ "</ul>"
+        header ^ String.concat "" content ^ "</ul>"
+      and parse_errors =
+        let header = "<h2>Parse errors</h2><ul>" in
+        let content =
+          SM.bindings !parse_errors |>
+          List.sort (fun (a, _) (b, _) -> String.compare a b) |>
+          List.map (fun (filename, reason) ->
+              "<li>" ^ filename ^ ": " ^ reason ^ "</li>")
+        in
+        header ^ String.concat "" content ^ "</ul>"
       in
       "<html><head><title>Opam-mirror status page</title></head><body><h1>Opam mirror status</h1><div>"
-      ^ String.concat "</div><div>" [ archive_stats ; active_downloads ; failed_downloads ]
+      ^ String.concat "</div><div>" [ archive_stats ; active_downloads ; failed_downloads ; parse_errors ]
         ^ "</div></body></html>"
 
     let not_modified request (modified, etag) =
