@@ -380,19 +380,7 @@ module Make
               Lwt.return_unit
             | `Value ->
               let open Digestif in
-              let sha256_final =
-                if verify_sha256 then
-                  let f s =
-                    let digest = SHA256.(to_raw_string (get s)) in
-                    if not (String.equal (Mirage_kv.Key.basename path) (Ohex.encode digest)) then
-                      Logs.err (fun m -> m "corrupt SHA256 data for %a, \
-                                            computed %s (should remove)"
-                                   Mirage_kv.Key.pp path (Ohex.encode digest))
-                  in
-                  Some f
-                else
-                  None
-              and md5_final =
+              let md5_final =
                 if not (SSet.mem (Mirage_kv.Key.basename path) md5s) then
                   let f s =
                     let digest = MD5.(to_raw_string (get s)) in
@@ -411,26 +399,53 @@ module Make
                 else
                   None
               in
-              match sha256_final, md5_final, sha512_final with
-              | None, None, None -> Lwt.return_unit
-              | _ ->
+              let sha256_final =
+                let need_to_compute = md5_final <> None || sha512_final <> None || verify_sha256 in
+                if need_to_compute then
+                  let f s =
+                    let digest = SHA256.(to_raw_string (get s)) in
+                    if not (String.equal (Mirage_kv.Key.basename path) (Ohex.encode digest)) then
+                      begin
+                        Logs.err (fun m -> m "corrupt SHA256 data for %a, \
+                                              computed %s (will rename)"
+                                     Mirage_kv.Key.pp path (Ohex.encode digest));
+                        false
+                      end else true
+                  in
+                  Some f
+                else
+                  None
+              in
+              match sha256_final with
+              | None -> Lwt.return_unit
+              | Some f ->
                 read_chunked t `SHA256 path
                   (fun (sha256, md5, sha512) data ->
                      Lwt.return
-                       (Option.map (fun t -> SHA256.feed_string t data) sha256,
+                       (SHA256.feed_string sha256 data,
                         Option.map (fun t -> MD5.feed_string t data) md5,
                         Option.map (fun t -> SHA512.feed_string t data) sha512))
-                  (Option.map (fun _ -> SHA256.empty) sha256_final,
+                  (SHA256.empty,
                    Option.map (fun _ -> MD5.empty) md5_final,
-                   Option.map (fun _ -> SHA512.empty) sha512_final) >|= function
+                   Option.map (fun _ -> SHA512.empty) sha512_final) >>= function
                 | Error e ->
                   Logs.err (fun m -> m "error %a of %a while computing digests"
-                               KV.pp_error e Mirage_kv.Key.pp path)
+                               KV.pp_error e Mirage_kv.Key.pp path);
+                  Lwt.return_unit
                 | Ok (sha256, md5, sha512) ->
-                  Option.iter (fun f -> f (Option.get sha256)) sha256_final;
-                  Option.iter (fun f -> f (Option.get md5)) md5_final;
-                  Option.iter (fun f -> f (Option.get sha512)) sha512_final;
-                  Logs.info (fun m -> m "added %a" Mirage_kv.Key.pp path))
+                  if not (f sha256) then
+                    (* bad sha256! *)
+                    KV.rename t.dev ~source:path ~dest:(Mirage_kv.Key.(v "delete" // path)) >|= function
+                    | Ok () -> ()
+                    | Error we ->
+                      Logs.err (fun m -> m "error %a while renaming %a" KV.pp_write_error we
+                                   Mirage_kv.Key.pp path)
+                  else begin
+                    Option.iter (fun f -> f (Option.get md5)) md5_final;
+                    Option.iter (fun f -> f (Option.get sha512)) sha512_final;
+                    Logs.info (fun m -> m "added %a" Mirage_kv.Key.pp path);
+                    Lwt.return_unit
+                  end)
           entries >>= fun () ->
         update_caches t >|= fun () ->
         t
