@@ -256,13 +256,6 @@ module Make
           in
           read_more a Optint.Int63.zero
 
-    let key_of_hash_csum (hash, csum) = match hash with
-      | `SHA512 ->
-        (* We can't use hex because the filename would become too long for tar *)
-        Mirage_kv.Key.(v (hash_to_string hash) / Base64.encode_string ~alphabet:Base64.uri_safe_alphabet ~pad:false csum)
-      | _ ->
-        Mirage_kv.Key.(v (hash_to_string hash) / Ohex.encode csum)
-
     let init_write t csums =
       let quux, csums = Archive_checksum.init_write csums in
       let swap = Swap.empty t.dev_swap in
@@ -334,7 +327,18 @@ module Make
           Logs.err (fun m -> m "Write failure for %s: %a" url pp_error e);
           add_failed url (Ptime.v (Pclock.now_d_ps ()))
             (Fmt.str "Write failure for %s: %a" url pp_error e)
-      else Lwt.return_unit
+      else begin
+        add_failed url (Ptime.v (Pclock.now_d_ps ()))
+          (Fmt.str "Bad checksum %s:%s: computed %s expected %s" url
+             (hash_to_string hash)
+             (Ohex.encode (Archive_checksum.get digests hash))
+             (Ohex.encode csum));
+        Logs.err (fun m -> m "Bad checksum %s:%s: computed %s expected %s" url
+                     (hash_to_string hash)
+                     (Ohex.encode (Archive_checksum.get digests hash))
+                     (Ohex.encode csum));
+        Lwt.return_unit
+      end
 
     (* on disk, we use a flat file system where the filename is the sha256 of the data *)
     let init ~verify_sha256 dev dev_md5s dev_sha512s dev_swap =
