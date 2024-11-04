@@ -192,6 +192,36 @@ module Make
     remove_active url;
     failed_downloads := SM.add url (ts, reason) !failed_downloads
 
+  let pp_failed ppf = function
+    | `Write_error e ->
+      Fmt.pf ppf "write error: %a" KV.pp_write_error e
+    | `Swap e ->
+      Fmt.pf ppf "swap error: %a" Swap.pp_error e
+    | `Bad_checksum (hash, computed, expected) ->
+      Fmt.pf ppf "%s checksum: computed %s expected %s"
+        (hash_to_string hash)
+        (Ohex.encode computed)
+        (Ohex.encode expected)
+    | `Bad_response (status, reason) ->
+      Fmt.pf ppf "bad response: %a %s" H2.Status.pp_hum status reason
+    | `Mimic me ->
+      Fmt.pf ppf "mimic: %a" Mimic.pp_error me
+
+  let compare_failed a b = match a, b with
+    | `Write_error _, `Write_error _ -> 0
+    | `Write_error _, _ -> 1
+    | _, `Write_error _ -> -1
+    | `Swap _, `Swap _ -> 0
+    | `Swap _, _ -> 1
+    | _, `Swap _ -> -1
+    | `Bad_checksum _, `Bad_checksum _ -> 0
+    | `Bad_checksum _, _ -> 1
+    | _, `Bad_checksum _ -> -1
+    | `Bad_response _, `Bad_response _ -> 0
+    | `Bad_response _, _ -> 1
+    | _, `Bad_response _ -> -1
+    | `Mimic _, `Mimic _ -> 0
+
   module Disk = struct
     type t = {
       mutable md5s : string SM.t ;
@@ -346,14 +376,12 @@ module Make
             | `Swap e -> Swap.pp_error ppf e
           in
           Logs.err (fun m -> m "Write failure for %s: %a" url pp_error e);
-          add_failed url (Ptime.v (Pclock.now_d_ps ()))
-            (Fmt.str "Write failure for %s: %a" url pp_error e)
+          match e with
+          | `Write_error e -> add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Write_error e)
+          | `Swap e -> add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Swap e)
       else begin
         add_failed url (Ptime.v (Pclock.now_d_ps ()))
-          (Fmt.str "Bad checksum %s:%s: computed %s expected %s" url
-             (hash_to_string hash)
-             (Ohex.encode (Archive_checksum.get digests hash))
-             (Ohex.encode csum));
+          (`Bad_checksum (hash, Archive_checksum.get digests hash, csum));
         Logs.err (fun m -> m "Bad checksum %s:%s: computed %s expected %s" url
                      (hash_to_string hash)
                      (Ohex.encode (Archive_checksum.get digests hash))
@@ -674,9 +702,13 @@ stamp: %S
         let header = "<h2>Failed downloads</h2><ul>" in
         let content =
           SM.bindings !failed_downloads |>
-          List.sort (fun (_, (a, _)) (_, (b, _)) -> sort_by_ts a b) |>
+          List.sort (fun (_, (a, reasona)) (_, (b, reasonb)) ->
+              match compare_failed reasona reasonb with
+              | 0 -> sort_by_ts a b
+              | n -> n) |>
           List.map (fun (url, (ts, reason)) ->
-              "<li>" ^ Ptime.to_rfc3339 ?tz_offset_s:None ts ^ ": " ^ url ^ " " ^ reason ^ "</li>")
+              Fmt.str "<li>%s: %s error %a"
+                (Ptime.to_rfc3339 ?tz_offset_s:None ts) url pp_failed reason)
         in
         header ^ String.concat "" content ^ "</ul>"
       and parse_errors =
@@ -867,28 +899,25 @@ stamp: %S
                 Logs.warn (fun m -> m "%s: %a (reason %s)"
                               url H2.Status.pp_hum resp.status resp.reason);
                 add_failed url (Ptime.v (Pclock.now_d_ps ()))
-                  (Fmt.str "%a %s" H2.Status.pp_hum resp.status resp.reason);
+                  (`Bad_response (resp.status, resp.reason));
                 Lwt.return_unit
               | Error `Write_error e ->
                 Logs.err (fun m -> m "%s: write error %a"
                               url
                               KV.pp_write_error e);
-                add_failed url (Ptime.v (Pclock.now_d_ps ()))
-                  (Fmt.str "write error: %a" KV.pp_write_error e);
+                add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Write_error e);
                 Lwt.return_unit
               | Error `Swap e ->
                 Logs.err (fun m -> m "%s: swap error %a"
                              url
                              Swap.pp_error e);
-                add_failed url (Ptime.v (Pclock.now_d_ps ()))
-                  (Fmt.str "swap error: %a" Swap.pp_error e);
+                add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Swap e);
                 Lwt.return_unit
               | Ok (digests, body) ->
                 Disk.finalize_write disk quux ~url body csums digests
             end
           | Error me ->
-            add_failed url (Ptime.v (Pclock.now_d_ps ()))
-              (Fmt.str "mimic error: %a" Mimic.pp_error me);
+            add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Mimic me);
             Lwt.return_unit)
       (SM.bindings urls) >>= fun () ->
     Disk.update_caches disk >|= fun () ->
