@@ -312,8 +312,12 @@ module Make
         and sha512 = Ohex.encode Digestif.SHA512.(to_raw_string (get digests.sha512)) in
         let dest = Mirage_kv.Key.v sha256 in
         Logs.info (fun m -> m "downloaded %s, now writing" url);
-        (Lwt.finalize (fun () -> set_from_handle t.dev dest swap)
-           (fun () -> Swap.free swap))
+        let temp = Mirage_kv.Key.(v "pending" // dest) in
+        Lwt_result.bind
+          (Lwt.finalize (fun () -> set_from_handle t.dev temp swap)
+             (fun () -> Swap.free swap))
+          (fun () -> KV.rename t.dev ~source:temp ~dest
+                     |> Lwt_result.map_error (fun e -> `Write_error e))
         >|= function
         | Ok () ->
           remove_active url;
