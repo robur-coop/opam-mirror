@@ -126,7 +126,7 @@ module Make
                              Store.pp_error e Mirage_kv.Key.pp step);
                 go ()
               | Ok steps ->
-                explore := !explore @ List.map fst steps;
+                explore := List.map fst steps @ !explore;
                 go ()
         in
         go ()
@@ -286,6 +286,12 @@ module Make
         common_bindings
 
     let set_from_handle dev dest h =
+      (* TODO: we need a function in tar which
+         (a) takes a path
+         (b) takes a function that reads (from the swap) and writes (to the tar)
+         (c) once the function is finished, it writes the tar header
+         -> this would allow us to avoid the rename stuff below
+      *)
       let size = Optint.Int63.of_int64 (Swap.size h) in
       KV.allocate dev dest size >>= fun r ->
       let rec loop offset =
