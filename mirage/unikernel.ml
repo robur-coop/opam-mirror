@@ -795,12 +795,9 @@ stamp: %S
 
   end
 
-  let bad_archives = SSet.of_list Bad.archives
-
   let download_archives parallel_downloads disk http_client store =
     (* FIXME: handle resuming partial downloads *)
     Git.find_urls store >>= fun urls ->
-    let urls = SM.filter (fun k _ -> not (SSet.mem k bad_archives)) urls in
     let pool = Lwt_pool.create parallel_downloads (Fun.const Lwt.return_unit) in
     let idx = ref 0 in
     Lwt_list.iter_p (fun (url, csums) ->
