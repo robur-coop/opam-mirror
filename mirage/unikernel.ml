@@ -163,23 +163,16 @@ module Make
   let active_downloads = ref SM.empty
 
   let add_to_active url ts =
-    active_downloads := SM.add url (ts, 0, "unknown size") !active_downloads
+    active_downloads := SM.add url (ts, 0) !active_downloads
 
   let remove_active url =
     active_downloads := SM.remove url !active_downloads
 
-  let active_length url written length =
-    match SM.find_opt url !active_downloads with
-    | None -> ()
-    | Some (ts, written', _) ->
-      active_downloads := SM.add url (ts, written + written', length)
-          !active_downloads
-
   let active_add_bytes url written =
     match SM.find_opt url !active_downloads with
     | None -> ()
-    | Some (ts, written', l) ->
-      active_downloads := SM.add url (ts, written + written', l)
+    | Some (ts, written') ->
+      active_downloads := SM.add url (ts, written + written')
           !active_downloads
 
   let failed_downloads = ref SM.empty
@@ -628,8 +621,8 @@ stamp: %S
       let active_downloads =
         let header = "<h2>Active downloads</h2><ul>" in
         let content =
-          SM.fold (fun url (ts, bytes_written, length_or_unknown) acc ->
-              ("<li>" ^ Ptime.to_rfc3339 ?tz_offset_s:None ts ^ ": " ^ url ^ " " ^ string_of_int bytes_written ^ " bytes written to disk, " ^ length_or_unknown ^ "</li>")
+          SM.fold (fun url (ts, bytes_written) acc ->
+              ("<li>" ^ Ptime.to_rfc3339 ?tz_offset_s:None ts ^ ": " ^ url ^ " " ^ string_of_int bytes_written ^ " bytes written to disk</li>")
               ^ acc)
             !active_downloads ""
         in
