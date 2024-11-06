@@ -194,33 +194,32 @@ module Make
 
   let pp_failed ppf = function
     | `Write_error e ->
-      Fmt.pf ppf "write error: %a" KV.pp_write_error e
+      KV.pp_write_error ppf e
     | `Swap e ->
-      Fmt.pf ppf "swap error: %a" Swap.pp_error e
+      Swap.pp_error ppf e
     | `Bad_checksum (hash, computed, expected) ->
       Fmt.pf ppf "%s checksum: computed %s expected %s"
         (hash_to_string hash)
         (Ohex.encode computed)
         (Ohex.encode expected)
     | `Bad_response (status, reason) ->
-      Fmt.pf ppf "bad response: %a %s" H2.Status.pp_hum status reason
+      Fmt.pf ppf "%a %s" H2.Status.pp_hum status reason
     | `Mimic me ->
-      Fmt.pf ppf "mimic: %a" Mimic.pp_error me
+      Mimic.pp_error ppf me
 
-  let compare_failed a b = match a, b with
-    | `Write_error _, `Write_error _ -> 0
-    | `Write_error _, _ -> 1
-    | _, `Write_error _ -> -1
-    | `Swap _, `Swap _ -> 0
-    | `Swap _, _ -> 1
-    | _, `Swap _ -> -1
-    | `Bad_checksum _, `Bad_checksum _ -> 0
-    | `Bad_checksum _, _ -> 1
-    | _, `Bad_checksum _ -> -1
-    | `Bad_response _, `Bad_response _ -> 0
-    | `Bad_response _, _ -> 1
-    | _, `Bad_response _ -> -1
-    | `Mimic _, `Mimic _ -> 0
+  let key_of_failed = function
+    | `Write_error _ -> `Write_error
+    | `Swap _ -> `Swap
+    | `Bad_checksum _ -> `Bad_checksum
+    | `Bad_response _ -> `Bad_response
+    | `Mimic _ -> `Mimic
+
+  let pp_key ppf = function
+    | `Write_error -> Fmt.pf ppf "Write error"
+    | `Swap -> Fmt.pf ppf "Swap error"
+    | `Bad_checksum -> Fmt.pf ppf "Bad checksum"
+    | `Bad_response -> Fmt.pf ppf "Bad response"
+    | `Mimic -> Fmt.pf ppf "Mimic"
 
   module Disk = struct
     type t = {
@@ -677,14 +676,15 @@ stamp: %S
             t.index <- index;
             Some (changes, urls))
 
-    let status disk =
+    let status t disk =
       (* report status:
          - archive size (can we easily measure?) and number of "good" elements
          - list of current downloads
          - list of failed downloads
       *)
       let archive_stats =
-        Fmt.str "<ul><li>%u validated archives on disk</li><li>%Lu bytes free</li></ul>"
+        Fmt.str "<ul><li>commit %s</li><li>last modified %s</li><li>repo %s</li><li>%u validated archives on disk</li><li>%Lu bytes free</li></ul>"
+          t.commit_id t.modified t.repo
           (SM.cardinal disk.Disk.md5s)
           (KV.free disk.Disk.dev)
       in
@@ -699,18 +699,37 @@ stamp: %S
         in
         header ^ String.concat "" content ^ "</ul>"
       and failed_downloads =
-        let header = "<h2>Failed downloads</h2><ul>" in
+        let header = "<h2>Failed downloads</h2>" in
+        let group_by xs =
+          let t = Hashtbl.create 7 in
+          List.iter (fun ((_, (_, reason)) as e) ->
+              let k = key_of_failed reason in
+              let els = Option.value ~default:[] (Hashtbl.find_opt t k) in
+              Hashtbl.replace t k (e :: els))
+            xs;
+          Hashtbl.fold (fun k els acc ->
+              let sorted =
+                List.sort (fun (_, (tsa, _)) (_, (tsb, _)) ->
+                    sort_by_ts tsa tsb)
+                  els
+              in
+              (k, sorted) :: acc)
+            t []
+        in
         let content =
           SM.bindings !failed_downloads |>
-          List.sort (fun (_, (a, reasona)) (_, (b, reasonb)) ->
-              match compare_failed reasona reasonb with
-              | 0 -> sort_by_ts a b
-              | n -> n) |>
-          List.map (fun (url, (ts, reason)) ->
-              Fmt.str "<li>%s: %s error %a"
-                (Ptime.to_rfc3339 ?tz_offset_s:None ts) url pp_failed reason)
+          group_by |>
+          List.map (fun (key, els) ->
+              let header = Fmt.str "<h3>%a</h3><ul>" pp_key key in
+              let content =
+                List.map (fun (url, (ts, reason)) ->
+                    Fmt.str "<li>%s: %s error %a"
+                      (Ptime.to_rfc3339 ?tz_offset_s:None ts) url pp_failed reason)
+                  els
+              in
+              header ^ String.concat "" content ^ "</ul>")
         in
-        header ^ String.concat "" content ^ "</ul>"
+        header ^ String.concat "" content
       and parse_errors =
         let header = "<h2>Parse errors</h2><ul>" in
         let content =
@@ -778,7 +797,7 @@ stamp: %S
         let resp = Httpaf.Response.create ~headers `OK in
         Httpaf.Reqd.respond_with_string reqd resp data
       | [ ""; x ] when String.equal x "status" ->
-        let data = status store in
+        let data = status t store in
         let mime_type = "text/html" in
         let headers = [
           "content-type", mime_type ;
