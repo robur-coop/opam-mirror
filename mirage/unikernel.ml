@@ -103,6 +103,8 @@ module Make
 
   let parse_errors = ref SM.empty
 
+  let reset_parse_errors () = parse_errors := SM.empty
+
   let add_parse_error filename error =
     parse_errors := SM.add filename error !parse_errors
 
@@ -188,6 +190,8 @@ module Make
 
   let failed_downloads = ref SM.empty
 
+  let reset_failed_downloads () = failed_downloads := SM.empty
+
   let add_failed url ts reason =
     remove_active url;
     failed_downloads := SM.add url (ts, reason) !failed_downloads
@@ -213,6 +217,21 @@ module Make
     | `Bad_checksum _ -> `Bad_checksum
     | `Bad_response _ -> `Bad_response
     | `Mimic _ -> `Mimic
+
+  let compare_failed_key a b = match a, b with
+    | `Write_error, `Write_error -> 0
+    | `Write_error, _ -> -1
+    | _, `Write_error -> 1
+    | `Swap, `Swap -> 0
+    | `Swap, _ -> -1
+    | _, `Swap -> 1
+    | `Bad_checksum, `Bad_checksum -> 0
+    | `Bad_checksum, _ -> -1
+    | _, `Bad_checksum -> 1
+    | `Bad_response, `Bad_response -> 0
+    | `Bad_response, _ -> -1
+    | _, `Bad_response -> 1
+    | `Mimic, `Mimic -> 0
 
   let pp_key ppf = function
     | `Write_error -> Fmt.pf ppf "Write error"
@@ -669,6 +688,7 @@ stamp: %S
             modified git_kv >>= fun modified ->
             Logs.info (fun m -> m "git: %s" commit_id);
             let repo = repo remote commit_id in
+            reset_parse_errors ();
             Tarball.of_git repo git_kv >|= fun (index, urls) ->
             t.commit_id <- commit_id ;
             t.modified <- modified ;
@@ -719,6 +739,7 @@ stamp: %S
         let content =
           SM.bindings !failed_downloads |>
           group_by |>
+          List.sort (fun (a, _) (b, _) -> compare_failed_key a b) |>
           List.map (fun (key, els) ->
               let header = Fmt.str "<h3>%a</h3><ul>" pp_key key in
               let content =
@@ -893,6 +914,7 @@ stamp: %S
 
   let download_archives parallel_downloads disk http_client urls =
     (* FIXME: handle resuming partial downloads *)
+    reset_failed_downloads ();
     let pool = Lwt_pool.create parallel_downloads (Fun.const Lwt.return_unit) in
     let idx = ref 0 in
     Lwt_list.iter_p (fun (url, csums) ->
