@@ -704,7 +704,7 @@ stamp: %S
       *)
       let archive_stats =
         Fmt.str "<ul><li>commit %s</li><li>last modified %s</li><li>repo %s</li><li>%u validated archives on disk</li><li>%Lu bytes free</li></ul>"
-          t.commit_id t.modified t.repo
+          t.commit_id t.modified (K.remote ())
           (SM.cardinal disk.Disk.md5s)
           (KV.free disk.Disk.dev)
       in
