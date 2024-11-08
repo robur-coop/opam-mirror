@@ -902,7 +902,9 @@ stamp: %S
     Logs.info (fun m -> m "downloading of %d urls done" (SM.cardinal urls))
 
   let dump_git git_dump git_kv =
-    Git_kv.to_octets git_kv >>= fun data ->
+    let stream = Git_kv.to_octets git_kv in
+    Lwt_stream.to_list stream >>= fun datas ->
+    let data = String.concat "" datas in
     Cache.write git_dump data >|= function
     | Ok () ->
       Logs.info (fun m -> m "dumped git %d bytes" (String.length data))
@@ -916,7 +918,8 @@ stamp: %S
       Logs.warn (fun m -> m "failed to read git state: %a" Cache.pp_error e);
       Lwt.return (Error ())
     | Ok Some data ->
-      Git_kv.of_octets git_ctx ~remote data >|= function
+      let stream = Lwt_stream.return data in
+      Git_kv.of_octets git_ctx ~remote stream >|= function
       | Ok git_kv -> Ok git_kv
       | Error `Msg msg ->
         Logs.err (fun m -> m "error restoring git state: %s" msg);
