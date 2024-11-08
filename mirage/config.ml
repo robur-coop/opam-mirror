@@ -14,6 +14,7 @@ let mirror =
       package ~min:"3.0.0" ~sublibs:[ "gz" ] "tar" ;
       package ~min:"3.0.0" "tar-mirage" ;
       package ~max:"0.2.0" "mirage-block-partition" ;
+      package ~min:"0.0.8" "http-mirage-client" ;
       package "gpt" ;
       package "gptar" ;
       package "oneffs" ;
