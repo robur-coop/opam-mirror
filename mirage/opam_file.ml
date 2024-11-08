@@ -1,6 +1,3 @@
-let src = Logs.Src.create "opam-file.opam-mirror" ~doc:"Opam file decoding in opam-mirror"
-module Log = (val Logs.src_log src : Logs.LOG)
-
 module HM = Archive_checksum.HM
 
 let hash_to_string = Archive_checksum.Hash.to_string
@@ -14,21 +11,15 @@ let decode_digest filename str =
   let hex h s =
     match hex_of_string s with
     | Ok d -> Ok (h, d)
-    | Error `Msg msg as e ->
-      Log.warn (fun m -> m "%s invalid hex (%s) %s" filename msg s);
-      e
+    | Error _ as e -> e
   in
   match String.split_on_char '=' str with
   | [ data ] -> hex `MD5 data
   | [ "md5" ; data ] -> hex `MD5 data
   | [ "sha256" ; data ] -> hex `SHA256 data
   | [ "sha512" ; data ] -> hex `SHA512 data
-  | [ hash ; _ ] ->
-    Log.warn (fun m -> m "%s unknown hash %s" filename hash);
-    Error (`Msg ("unknown hash " ^ hash))
-  | _ ->
-    Log.warn (fun m -> m "%s unexpected hash format %S" filename str);
-    Error (`Msg ("unexpected hash format " ^ str))
+  | [ hash ; _ ] -> Error (`Msg ("unknown hash " ^ hash))
+  | _ -> Error (`Msg ("unexpected hash format " ^ str))
 
 let extract_url_checksum filename items =
   let open OpamParserTypes.FullPos in
@@ -49,9 +40,7 @@ let extract_url_checksum filename items =
     match url, archive with
     | Some { pelem = Variable (_, { pelem = String url ; _ }) ; _ }, None -> Ok url
     | None, Some { pelem = Variable (_, { pelem = String url ; _ }); _ } -> Ok url
-    | _ ->
-      Log.warn (fun m -> m "%s neither src nor archive present" filename);
-      Error (`Msg "neither 'src' nor 'archive' present")
+    | _ -> Error (`Msg "neither 'src' nor 'archive' present")
   in
   let csum, csum_errs =
     match checksum with
@@ -67,8 +56,8 @@ let extract_url_checksum filename items =
                       | None -> Some v
                       | Some v' when String.equal v v' -> None
                       | Some v' ->
-                        Log.warn (fun m -> m "for %s, hash %s, multiple keys are present: %s %s"
-                                     (Result.value ~default:"NONE" url) (hash_to_string h) (Ohex.encode v) (Ohex.encode v'));
+                        Logs.warn (fun m -> m "for %s, hash %s, multiple keys are present: %s %s"
+                                      (Result.value ~default:"NONE" url) (hash_to_string h) (Ohex.encode v) (Ohex.encode v'));
                         None)
                     csums, errs
               end
@@ -87,9 +76,7 @@ let extract_url_checksum filename items =
         | Error _ as e -> e, []
         | Ok (h, v) -> Ok (HM.singleton h v), []
       end
-    | _ ->
-      Log.warn (fun m -> m "couldn't decode checksum in %s" filename);
-      Error (`Msg "couldn't find or decode 'checksum'"), []
+    | _ -> Error (`Msg "couldn't find or decode 'checksum'"), []
   in
   (match url, csum with
    | Ok url, Ok csum -> Ok (url, csum)
@@ -107,7 +94,6 @@ let extract_checksums_and_urls filename opam =
         end
       | { pelem = Section ({ section_kind = { pelem = "extra-source" ; _ } ; section_name = Some { pelem ; _ } ;  section_items = { pelem = items ; _ };  _ }) ; _} ->
         begin
-          Log.debug (fun m -> m "extracting for extra-source %s in %s" filename pelem);
           match extract_url_checksum filename items with
           | Error `Msg msg, errs' -> csum_urls, `Msg ("extra-source " ^ pelem ^ " " ^ msg) :: errs' @ errs
           | Ok url, errs' -> url :: csum_urls, errs' @ errs
@@ -134,7 +120,6 @@ let extract_urls filename str =
       opamfile.file_contents
   in
   if unavailable then
-    (Log.debug (fun m -> m "%s is marked unavailable, skipping" filename);
-     [], [])
+     [], []
   else
     extract_checksums_and_urls filename opamfile
