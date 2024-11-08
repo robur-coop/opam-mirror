@@ -52,7 +52,7 @@ let update_digests { md5; sha256; sha512 } data =
 
 let init_write csums =
   let hash, csum = HM.max_binding csums in
-  (hash, csum), Ok (empty_digests, `Init)
+  (hash, csum), empty_digests
 
 let digests_to_hm digests =
   HM.empty

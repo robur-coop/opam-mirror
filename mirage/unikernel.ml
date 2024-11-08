@@ -53,6 +53,11 @@ module K = struct
     let doc = Arg.info ~doc ["sectors-git"] in
     Mirage_runtime.register_arg Arg.(value & opt int64 Int64.(mul 40L (mul 2L 1024L)) doc)
 
+  let sectors_swap =
+    let doc = "Number of sectors reserved for swap. Only used with --initialize-disk" in
+    let doc = Arg.info ~doc ["sectors-swap"] in
+    Mirage_runtime.register_arg Arg.(value & opt int64 Int64.(mul 1024L 2048L) doc)
+
   let initialize_disk =
     let doc = "Initialize the disk with a partition table. THIS IS DESTRUCTIVE!" in
     let doc = Arg.info ~doc ["initialize-disk"] in
@@ -75,6 +80,7 @@ module Make
   module Part = Partitions.Make(BLOCK)
   module KV = Tar_mirage.Make_KV_RW(Pclock)(Part)
   module Cache = OneFFS.Make(Part)
+  module Swap = Swapfs.Make(Part)
   module Store = Git_kv.Make(Pclock)
 
   module SM = Map.Make(String)
@@ -95,92 +101,133 @@ module Make
         hash_to_string h ^ "=" ^ Ohex.encode v ^ "\n" ^ acc)
       hm ""
 
-  module Git = struct
-    let find_contents store =
-      let rec go store path acc =
-        Store.list store path >>= function
-        | Error e ->
-          Logs.err (fun m -> m "error %a while listing %a"
-                       Store.pp_error e Mirage_kv.Key.pp path);
-          Lwt.return acc
-        | Ok steps ->
-          Lwt_list.fold_left_s (fun acc (step, _) ->
-              Store.exists store step >>= function
-              | Error e ->
-                Logs.err (fun m -> m "error %a for exists %a" Store.pp_error e
-                             Mirage_kv.Key.pp step);
-                Lwt.return acc
-              | Ok None ->
-                Logs.warn (fun m -> m "no typ for %a" Mirage_kv.Key.pp step);
-                Lwt.return acc
-              | Ok Some `Value -> Lwt.return (step :: acc)
-              | Ok Some `Dictionary -> go store step acc) acc steps
-      in
-      go store Mirage_kv.Key.empty []
+  let parse_errors = ref SM.empty
 
-    let find_urls store =
-      find_contents store >>= fun paths ->
-      let opam_paths =
-        List.filter (fun p -> Mirage_kv.Key.basename p = "opam") paths
+  let reset_parse_errors () = parse_errors := SM.empty
+
+  let add_parse_error filename error =
+    parse_errors := SM.add filename error !parse_errors
+
+  module Git = struct
+    let contents store =
+      let explore = ref [ Mirage_kv.Key.empty ] in
+      let more () =
+        let rec go () =
+          match !explore with
+          | [] -> Lwt.return None
+          | step :: tl ->
+            explore := tl;
+            Store.exists store step >>= function
+            | Error e -> go ()
+            | Ok None -> go ()
+            | Ok Some `Value -> Lwt.return (Some step)
+            | Ok Some `Dictionary ->
+              Store.list store step >>= function
+              | Error e -> go ()
+              | Ok steps ->
+                explore := List.map fst steps @ !explore;
+                go ()
+        in
+        go ()
       in
-      Lwt_list.fold_left_s (fun acc path ->
-          Store.get store path >|= function
-          | Ok data ->
-            (* TODO report parser errors *)
-            (try
-               let url_csums = Opam_file.extract_urls (Mirage_kv.Key.to_string path) data in
-               List.fold_left (fun acc (url, csums) ->
-                   if HM.cardinal csums = 0 then
-                     (Logs.warn (fun m -> m "no checksums for %s, ignoring" url); acc)
-                   else
-                     SM.update url (function
-                         | None -> Some csums
-                         | Some csums' ->
-                           if HM.for_all (fun h v ->
-                               match HM.find_opt h csums with
-                               | None -> true | Some v' -> String.equal v v')
-                               csums'
-                           then
-                             Some (HM.union (fun _h v _v' -> Some v) csums csums')
-                           else begin
-                             Logs.warn (fun m -> m "mismatching hashes for %s: %s vs %s"
-                                           url (hm_to_s csums') (hm_to_s csums));
-                             None
-                           end) acc) acc url_csums
-             with _ ->
-               Logs.warn (fun m -> m "some error in %a, ignoring" Mirage_kv.Key.pp path);
+      Lwt_stream.from more
+
+    let find_urls acc path data =
+      if Mirage_kv.Key.basename path = "opam" then
+        let path = Mirage_kv.Key.to_string path in
+        let url_csums, errs = Opam_file.extract_urls path data in
+        List.iter (fun (`Msg msg) -> add_parse_error path msg) errs;
+        List.fold_left (fun acc (url, csums) ->
+            if HM.cardinal csums = 0 then
+              (add_parse_error path ("no checksums for " ^ url);
                acc)
-          | Error e -> Logs.warn (fun m -> m "Store.get: %a" Store.pp_error e); acc)
-        SM.empty opam_paths
+            else
+              SM.update url (function
+                  | None -> Some csums
+                  | Some csums' ->
+                    if HM.for_all (fun h v ->
+                        match HM.find_opt h csums with
+                        | None -> true | Some v' -> String.equal v v')
+                        csums'
+                    then
+                      Some (HM.union (fun _h v _v' -> Some v) csums csums')
+                    else begin
+                      add_parse_error path (Fmt.str
+                                              "mismatching hashes for %s: %s vs %s"
+                                              url (hm_to_s csums') (hm_to_s csums));
+                      None
+                    end) acc) acc url_csums
+      else
+        acc
+
   end
 
   let active_downloads = ref SM.empty
 
   let add_to_active url ts =
-    active_downloads := SM.add url (ts, 0, "unknown size") !active_downloads
+    active_downloads := SM.add url (ts, 0) !active_downloads
 
   let remove_active url =
     active_downloads := SM.remove url !active_downloads
 
-  let active_length url written length =
-    match SM.find_opt url !active_downloads with
-    | None -> ()
-    | Some (ts, written', _) ->
-      active_downloads := SM.add url (ts, written + written', length)
-          !active_downloads
-
   let active_add_bytes url written =
     match SM.find_opt url !active_downloads with
     | None -> ()
-    | Some (ts, written', l) ->
-      active_downloads := SM.add url (ts, written + written', l)
+    | Some (ts, written') ->
+      active_downloads := SM.add url (ts, written + written')
           !active_downloads
 
   let failed_downloads = ref SM.empty
 
+  let reset_failed_downloads () = failed_downloads := SM.empty
+
   let add_failed url ts reason =
     remove_active url;
     failed_downloads := SM.add url (ts, reason) !failed_downloads
+
+  let pp_failed ppf = function
+    | `Write_error e ->
+      KV.pp_write_error ppf e
+    | `Swap e ->
+      Swap.pp_error ppf e
+    | `Bad_checksum (hash, computed, expected) ->
+      Fmt.pf ppf "%s checksum: computed %s expected %s"
+        (hash_to_string hash)
+        (Ohex.encode computed)
+        (Ohex.encode expected)
+    | `Bad_response (status, reason) ->
+      Fmt.pf ppf "%a %s" H2.Status.pp_hum status reason
+    | `Mimic me ->
+      Mimic.pp_error ppf me
+
+  let key_of_failed = function
+    | `Write_error _ -> `Write_error
+    | `Swap _ -> `Swap
+    | `Bad_checksum _ -> `Bad_checksum
+    | `Bad_response _ -> `Bad_response
+    | `Mimic _ -> `Mimic
+
+  let compare_failed_key a b = match a, b with
+    | `Write_error, `Write_error -> 0
+    | `Write_error, _ -> -1
+    | _, `Write_error -> 1
+    | `Swap, `Swap -> 0
+    | `Swap, _ -> -1
+    | _, `Swap -> 1
+    | `Bad_checksum, `Bad_checksum -> 0
+    | `Bad_checksum, _ -> -1
+    | _, `Bad_checksum -> 1
+    | `Bad_response, `Bad_response -> 0
+    | `Bad_response, _ -> -1
+    | _, `Bad_response -> 1
+    | `Mimic, `Mimic -> 0
+
+  let pp_key ppf = function
+    | `Write_error -> Fmt.pf ppf "Write error"
+    | `Swap -> Fmt.pf ppf "Swap error"
+    | `Bad_checksum -> Fmt.pf ppf "Bad checksum"
+    | `Bad_response -> Fmt.pf ppf "Bad response"
+    | `Mimic -> Fmt.pf ppf "Mimic"
 
   module Disk = struct
     type t = {
@@ -189,13 +236,10 @@ module Make
       dev : KV.t ;
       dev_md5s : Cache.t ;
       dev_sha512s : Cache.t ;
+      dev_swap : Swap.t ;
     }
 
-    let pending = Mirage_kv.Key.v "pending"
-
-    let to_delete = Mirage_kv.Key.v "to-delete"
-
-    let empty dev dev_md5s dev_sha512s = { md5s = SM.empty ; sha512s = SM.empty ; dev; dev_md5s; dev_sha512s }
+    let empty dev dev_md5s dev_sha512s dev_swap = { md5s = SM.empty ; sha512s = SM.empty ; dev; dev_md5s; dev_sha512s ; dev_swap }
 
     let marshal_sm (sm : string SM.t) =
       let version = char_of_int 1 in
@@ -210,11 +254,11 @@ module Make
     let update_caches t =
       Cache.write t.dev_md5s (marshal_sm t.md5s) >>= fun r ->
       (match r with
-       | Ok () -> Logs.info (fun m -> m "Set 'md5s'")
+       | Ok () -> ()
        | Error e -> Logs.warn (fun m -> m "Failed to write 'md5s': %a" Cache.pp_write_error e));
       Cache.write t.dev_sha512s (marshal_sm t.sha512s) >>= fun r ->
       match r with
-      | Ok () -> Logs.info (fun m -> m "Set 'sha512s'"); Lwt.return_unit
+      | Ok () -> Lwt.return_unit
       | Error e ->
         Logs.warn (fun m -> m "Failed to write 'sha512s': %a" Cache.pp_write_error e);
         Lwt.return_unit
@@ -240,8 +284,6 @@ module Make
       | Ok key ->
         KV.size t.dev key >>= function
         | Error e ->
-          Logs.err (fun m -> m "error %a while reading %s %a"
-                       KV.pp_error e (hash_to_string h) Mirage_kv.Key.pp v);
           Lwt.return (Error (`Not_found key))
         | Ok len ->
           let chunk_size = 4096 in
@@ -252,121 +294,27 @@ module Make
                 f a data >>= fun a ->
                 read_more a Optint.Int63.(add offset (of_int chunk_size))
               | Error e ->
-                Logs.err (fun m -> m "error %a while reading %s %a"
-                             KV.pp_error e (hash_to_string h) Mirage_kv.Key.pp v);
                 Lwt.return (Error e)
             else
               Lwt.return (Ok a)
           in
           read_more a Optint.Int63.zero
 
-    (*
-    module HM_running = struct
-
-      let empty h =
-        let module H = (val Mirage_crypto.Hash.module_of h) in
-        (* We need MD5, SHA256 and SHA512. [h] is likely one of the
-           aforementioned and in that case we don't compute the same hash twice
-        *)
-        HM.empty
-        |> HM.add `MD5 Mirage_crypto.Hash.MD5.empty
-        |> HM.add `SHA256 Mirage_crypto.Hash.SHA256.empty
-        |> HM.add `SHA512 Mirage_crypto.Hash.SHA512.empty
-        |> HM.add h H.empty
-
-      let feed t data =
-        HM.map (fun h v ->
-            let module H = (val Mirage_crypto.Hash.module_of h) in
-            H.feed v data)
-          t
-
-      let get =
-        HM.map (fun h v ->
-            let module H = (val Mirage_crypto.Hash.module_of h) in
-            H.get v)
-
-
-    end
-       *)
-
-    let content_length_of_string s =
-      match Int64.of_string s with
-      | len when len >= 0L -> `Fixed len
-      | _ | exception _ -> `Bad_response
-
-    let body_length headers =
-      match H2.Headers.get_multi headers "content-length" with
-      | [] -> `Unknown
-      | [ x ] ->  content_length_of_string x
-      | hd :: tl ->
-        (* if there are multiple content-length headers we require them all to be
-         * exactly equal. *)
-        if List.for_all (String.equal hd) tl then
-          content_length_of_string hd
-        else
-          `Bad_response
-
-    let body_length (response : Http_mirage_client.response) =
-      if response.status <> `OK then
-        `Bad_response
-      else
-        body_length response.headers
-
-    let pending_key (hash, csum) =
-      match hash with
-      | `SHA512 ->
-        (* We can't use hex because the filename would become too long for tar *)
-        Mirage_kv.Key.(pending / hash_to_string hash / Base64.encode_string ~alphabet:Base64.uri_safe_alphabet ~pad:false csum)
-      | _ ->
-        Mirage_kv.Key.(pending / hash_to_string hash / Ohex.encode csum)
-
-    let to_delete_key (hash, csum) =
-      let rand = "random" in (* FIXME: generate random string *)
-      let encoded_csum =
-        match hash with
-        | `SHA512 ->
-          (* We can't use hex because the filename would become too long for tar *)
-          Base64.encode_string ~alphabet:Base64.uri_safe_alphabet ~pad:false csum
-        | _ ->
-          Ohex.encode csum
-      in
-      Mirage_kv.Key.(to_delete / hash_to_string hash / (encoded_csum ^ "." ^ rand))
+    let init_write t csums =
+      let quux, csums = Archive_checksum.init_write csums in
+      let swap = Swap.empty t.dev_swap in
+      quux, Ok (csums, swap)
 
     let write_partial t (hash, csum) url =
       (* XXX: we may be in trouble if different hash functions are used for the same archive *)
-      let key = pending_key (hash, csum) in
       let ( >>>= ) = Lwt_result.bind in
       fun response r data ->
-        Lwt.return r >>>= fun (digests, acc) ->
+        Lwt.return r >>>= fun (digests, swap) ->
         let digests = Archive_checksum.update_digests digests data in
-        match acc with
-        | `Init ->
-          begin match body_length response with
-          | `Bad_response -> Lwt.return (Error `Bad_response)
-          | `Fixed size ->
-            KV.allocate t.dev key (Optint.Int63.of_int64 size)
-            |> Lwt_result.map_error (fun e -> `Write_error e)
-            >>>= fun () ->
-            KV.set_partial t.dev key ~offset:Optint.Int63.zero data
-            |> Lwt_result.map_error (fun e -> `Write_error e) >>>= fun () ->
-            let len = String.length data in
-            let offset = Optint.Int63.of_int len in
-            active_length url len (Int64.to_string size ^ " bytes");
-            Lwt.return_ok (digests, `Fixed_body (size, offset))
-          | `Unknown ->
-            active_add_bytes url (String.length data);
-            Lwt.return_ok (digests, `Unknown data)
-          end
-        | `Fixed_body (size, offset) ->
-          KV.set_partial t.dev key ~offset data
-          |> Lwt_result.map_error (fun e -> `Write_error e) >>>= fun () ->
-          let len = String.length data in
-          let offset = Optint.Int63.(add offset (of_int len)) in
-          active_add_bytes url len;
-          Lwt.return_ok (digests, `Fixed_body (size, offset))
-        | `Unknown body ->
-          active_add_bytes url (String.length data);
-          Lwt.return_ok (digests, `Unknown (body ^ data))
+        active_add_bytes url (String.length data);
+        Swap.append swap data >|= function
+        | Ok () -> Ok (digests, swap)
+        | Error swap_err -> Error (`Swap swap_err)
 
     let check_csums_digests csums digests =
       let csums' = Archive_checksum.digests_to_hm digests in
@@ -376,126 +324,90 @@ module Make
         (fun (h, csum) -> String.equal csum (HM.find h csums))
         common_bindings
 
-    let finalize_write t (hash, csum) ~url (body : [ `Unknown of string | `Fixed_body of int64 * Optint.Int63.t | `Init ]) csums digests =
-      let sizes_match, body_size_in_header =
-        match body with
-        | `Fixed_body (reported, actual) -> Optint.Int63.(equal (of_int64 reported) actual), true
-        | `Unknown _ -> true, false
-        | `Init -> assert false
+    let set_from_handle dev dest h =
+      (* TODO: we need a function in tar which
+         (a) takes a path
+         (b) takes a function that reads (from the swap) and writes (to the tar)
+         (c) once the function is finished, it writes the tar header
+         -> this would allow us to avoid the rename stuff below
+      *)
+      let size = Optint.Int63.of_int64 (Swap.size h) in
+      KV.allocate dev dest size >>= fun r ->
+      let rec loop offset =
+        if offset = Swap.size h then
+          Lwt.return_ok ()
+        else
+          let length = Int64.(to_int (min 4096L (sub (Swap.size h) offset))) in
+          Swap.get_partial h ~offset ~length >>= fun r ->
+          match r with
+          | Error e -> Lwt.return (Error (`Swap e))
+          | Ok data ->
+            KV.set_partial dev dest ~offset:(Optint.Int63.of_int64 offset) data
+            >>= fun r ->
+            match r with
+            | Error e -> Lwt.return (Error (`Write_error e))
+            | Ok () ->
+              loop Int64.(add offset (of_int length))
       in
-      let source = pending_key (hash, csum) in
-      if check_csums_digests csums digests && sizes_match then
+      match r with
+      | Ok () ->
+        loop 0L
+      | Error e ->
+        Lwt.return (Error (`Write_error e))
+
+    let finalize_write t (hash, csum) ~url swap csums digests =
+      if check_csums_digests csums digests then
         let sha256 = Ohex.encode Digestif.SHA256.(to_raw_string (get digests.sha256))
         and md5 = Ohex.encode Digestif.MD5.(to_raw_string (get digests.md5))
         and sha512 = Ohex.encode Digestif.SHA512.(to_raw_string (get digests.sha512)) in
         let dest = Mirage_kv.Key.v sha256 in
-        begin match body with
-        | `Unknown body ->
-          Logs.info (fun m -> m "downloaded %s, now writing" url);
-          KV.set t.dev dest body
-        | `Fixed_body (_reported_size, _actual_size) ->
-          Logs.info (fun m -> m "downloaded %s" url);
-          KV.rename t.dev ~source ~dest
-        | `Init -> assert false
-        end >|= function
+        let temp = Mirage_kv.Key.(v "pending" // dest) in
+        Lwt_result.bind
+          (Lwt.finalize (fun () -> set_from_handle t.dev temp swap)
+             (fun () -> Swap.free swap))
+          (fun () -> KV.rename t.dev ~source:temp ~dest
+                     |> Lwt_result.map_error (fun e -> `Write_error e))
+        >|= function
         | Ok () ->
           remove_active url;
           t.md5s <- SM.add md5 sha256 t.md5s;
           t.sha512s <- SM.add sha512 sha256 t.sha512s
-        | Error e ->
-          Logs.err (fun m -> m "Write failure for %s: %a" url KV.pp_write_error e);
-          add_failed url (Ptime.v (Pclock.now_d_ps ()))
-            (Fmt.str "Write failure for %s: %a" url KV.pp_write_error e)
+        | Error `Write_error e -> add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Write_error e)
+        | Error `Swap e -> add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Swap e)
       else begin
-        (if sizes_match then begin
-           add_failed url (Ptime.v (Pclock.now_d_ps ()))
-             (Fmt.str "Bad checksum %s:%s: computed %s expected %s" url
-                        (hash_to_string hash)
-                        (Ohex.encode (Archive_checksum.get digests hash))
-                        (Ohex.encode csum));
-           Logs.err (fun m -> m "Bad checksum %s:%s: computed %s expected %s" url
-                        (hash_to_string hash)
-                        (Ohex.encode (Archive_checksum.get digests hash))
-                        (Ohex.encode csum))
-         end else match body with
-           | `Fixed_body (reported, actual) ->
-             add_failed url (Ptime.v (Pclock.now_d_ps ()))
-               (Fmt.str "Size mismatch %s: received %a bytes expected %Lu bytes"
-                  url Optint.Int63.pp actual reported);
-             Logs.err (fun m -> m "Size mismatch %s: received %a bytes expected %Lu bytes"
-                          url Optint.Int63.pp actual reported)
-           | `Unknown _ -> assert false
-           | `Init -> assert false);
-        if body_size_in_header then
-          (* if the checksums mismatch we want to delete the file. We are only
-             able to do so if it was the latest created file, so we expect and
-             error. Ideally, we want to match for `Append_only or other errors *)
-          KV.remove t.dev source >>= function
-          | Ok () -> Lwt.return_unit
-          | Error e ->
-            (* we failed to delete the file so we mark it for deletion *)
-            let dest = to_delete_key (hash, csum) in
-            Logs.warn (fun m -> m "Failed to remove %a: %a. Moving it to %a"
-                          Mirage_kv.Key.pp source KV.pp_write_error e Mirage_kv.Key.pp dest);
-            KV.rename t.dev ~source ~dest >|= function
-            | Ok () -> ()
-            | Error e ->
-              Logs.warn (fun m -> m "Error renaming file %a -> %a: %a"
-                            Mirage_kv.Key.pp source Mirage_kv.Key.pp dest KV.pp_write_error e)
-        else
-          Lwt.return_unit
+        add_failed url (Ptime.v (Pclock.now_d_ps ()))
+          (`Bad_checksum (hash, Archive_checksum.get digests hash, csum));
+        Lwt.return_unit
       end
 
     (* on disk, we use a flat file system where the filename is the sha256 of the data *)
-    let init ~verify_sha256 dev dev_md5s dev_sha512s =
+    let init ~verify_sha256 dev dev_md5s dev_sha512s dev_swap =
       KV.list dev Mirage_kv.Key.empty >>= function
-      | Error e -> Logs.err (fun m -> m "error %a listing kv" KV.pp_error e); assert false
+      | Error e -> invalid_arg (Fmt.str "error %a listing kv" KV.pp_error e)
       | Ok entries ->
-        let t = empty dev dev_md5s dev_sha512s in
+        let t = empty dev dev_md5s dev_sha512s dev_swap in
         Cache.read t.dev_md5s >>= fun r ->
         (match r with
          | Ok Some s ->
            if not verify_sha256 then
              Result.iter (fun md5s -> t.md5s <- md5s) (unmarshal_sm s)
-         | Ok None -> Logs.debug (fun m -> m "No md5s cached")
+         | Ok None -> ()
          | Error e -> Logs.warn (fun m -> m "Error reading md5s cache: %a" Cache.pp_error e));
         Cache.read t.dev_sha512s >>= fun r ->
         (match r with
          | Ok Some s ->
            if not verify_sha256 then
              Result.iter (fun sha512s -> t.sha512s <- sha512s) (unmarshal_sm s)
-         | Ok None -> Logs.debug (fun m -> m "No sha512s cached")
+         | Ok None -> ()
          | Error e -> Logs.warn (fun m -> m "Error reading sha512s cache: %a" Cache.pp_error e));
         let md5s = SSet.of_list (List.map snd (SM.bindings t.md5s))
         and sha512s = SSet.of_list (List.map snd (SM.bindings t.sha512s)) in
-        let idx = ref 1 in
-        (* XXX: should we do something about pending downloads?? *)
-        let entries =
-          List.filter (fun (p, _) ->
-              not (Mirage_kv.Key.equal p pending || Mirage_kv.Key.equal p to_delete))
-            entries
-        in
         Lwt_list.iter_s (fun (path, typ) ->
-            if !idx mod 10 = 0 then Gc.full_major () ;
             match typ with
-            | `Dictionary ->
-              Logs.warn (fun m -> m "unexpected dictionary at %a" Mirage_kv.Key.pp path);
-              Lwt.return_unit
+            | `Dictionary -> Lwt.return_unit
             | `Value ->
               let open Digestif in
-              let sha256_final =
-                if verify_sha256 then
-                  let f s =
-                    let digest = SHA256.(to_raw_string (get s)) in
-                    if not (String.equal (Mirage_kv.Key.basename path) (Ohex.encode digest)) then
-                      Logs.err (fun m -> m "corrupt SHA256 data for %a, \
-                                            computed %s (should remove)"
-                                   Mirage_kv.Key.pp path (Ohex.encode digest))
-                  in
-                  Some f
-                else
-                  None
-              and md5_final =
+              let md5_final =
                 if not (SSet.mem (Mirage_kv.Key.basename path) md5s) then
                   let f s =
                     let digest = MD5.(to_raw_string (get s)) in
@@ -514,26 +426,52 @@ module Make
                 else
                   None
               in
-              match sha256_final, md5_final, sha512_final with
-              | None, None, None -> Lwt.return_unit
-              | _ ->
+              let sha256_final =
+                let need_to_compute = md5_final <> None || sha512_final <> None || verify_sha256 in
+                if need_to_compute then
+                  let f s =
+                    let digest = SHA256.(to_raw_string (get s)) in
+                    if not (String.equal (Mirage_kv.Key.basename path) (Ohex.encode digest)) then
+                      begin
+                        Logs.err (fun m -> m "corrupt SHA256 data for %a, \
+                                              computed %s (will rename)"
+                                     Mirage_kv.Key.pp path (Ohex.encode digest));
+                        false
+                      end else true
+                  in
+                  Some f
+                else
+                  None
+              in
+              match sha256_final with
+              | None -> Lwt.return_unit
+              | Some f ->
                 read_chunked t `SHA256 path
                   (fun (sha256, md5, sha512) data ->
                      Lwt.return
-                       (Option.map (fun t -> SHA256.feed_string t data) sha256,
+                       (SHA256.feed_string sha256 data,
                         Option.map (fun t -> MD5.feed_string t data) md5,
                         Option.map (fun t -> SHA512.feed_string t data) sha512))
-                  (Option.map (fun _ -> SHA256.empty) sha256_final,
+                  (SHA256.empty,
                    Option.map (fun _ -> MD5.empty) md5_final,
-                   Option.map (fun _ -> SHA512.empty) sha512_final) >|= function
+                   Option.map (fun _ -> SHA512.empty) sha512_final) >>= function
                 | Error e ->
                   Logs.err (fun m -> m "error %a of %a while computing digests"
-                               KV.pp_error e Mirage_kv.Key.pp path)
+                               KV.pp_error e Mirage_kv.Key.pp path);
+                  Lwt.return_unit
                 | Ok (sha256, md5, sha512) ->
-                  Option.iter (fun f -> f (Option.get sha256)) sha256_final;
-                  Option.iter (fun f -> f (Option.get md5)) md5_final;
-                  Option.iter (fun f -> f (Option.get sha512)) sha512_final;
-                  Logs.info (fun m -> m "added %a" Mirage_kv.Key.pp path))
+                  if not (f sha256) then
+                    (* bad sha256! *)
+                    KV.rename t.dev ~source:path ~dest:(Mirage_kv.Key.(v "delete" // path)) >|= function
+                    | Ok () -> ()
+                    | Error we ->
+                      Logs.err (fun m -> m "error %a while renaming %a" KV.pp_write_error we
+                                   Mirage_kv.Key.pp path)
+                  else begin
+                    Option.iter (fun f -> f (Option.get md5)) md5_final;
+                    Option.iter (fun f -> f (Option.get sha512)) sha512_final;
+                    Lwt.return_unit
+                  end)
           entries >>= fun () ->
         update_caches t >|= fun () ->
         t
@@ -544,15 +482,9 @@ module Make
       | Ok x ->
         KV.exists t.dev x >|= function
         | Ok Some `Value -> true
-        | Ok Some `Dictionary ->
-          Logs.err (fun m -> m "unexpected dictionary for %s %a"
-                       (hash_to_string h) Mirage_kv.Key.pp v);
-          false
+        | Ok Some `Dictionary -> false
         | Ok None -> false
-        | Error e ->
-          Logs.err (fun m -> m "exists %s %a returned %a"
-                       (hash_to_string h) Mirage_kv.Key.pp v KV.pp_error e);
-          false
+        | Error _ -> false
 
     let last_modified t h v =
       match find_key t h v with
@@ -560,10 +492,7 @@ module Make
       | Ok x ->
         KV.last_modified t.dev x >|= function
         | Ok data -> Ok data
-        | Error e ->
-          Logs.err (fun m -> m "error %a while last_modified %s %a"
-                       KV.pp_error e (hash_to_string h) Mirage_kv.Key.pp v);
-          Error `Not_found
+        | Error _ -> Error `Not_found
 
     let size t h v =
       match find_key t h v with
@@ -571,10 +500,7 @@ module Make
       | Ok x ->
         KV.size t.dev x >|= function
         | Ok s -> Ok s
-        | Error e ->
-          Logs.err (fun m -> m "error %a while size %s %a"
-                       KV.pp_error e (hash_to_string h) Mirage_kv.Key.pp v);
-          Error `Not_found
+        | Error _ -> Error `Not_found
     end
 
   module Tarball = struct
@@ -614,22 +540,23 @@ module Make
         then Tar.High (High.inj (Lwt.return_ok None))
         else begin closed := true; Tar.High (High.inj (Lwt.return_ok (Some  data))) end
 
-    let entries_of_git ~mtime store repo =
-      Git.find_contents store >>= fun paths ->
-      let entries = Lwt_stream.of_list paths in
+    let entries_of_git ~mtime store repo urls =
+      let entries = Git.contents store in
       let to_entry path =
         Store.get store path >|= function
         | Ok data ->
           let data =
             if Mirage_kv.Key.(equal path (v "repo"))
-            then repo else data in
+            then repo else data
+          in
           let file_mode = 0o644
           and mod_time = Int64.of_int mtime
           and user_id = 0
           and group_id = 0
           and size = String.length data in
           let hdr = Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
-            (Mirage_kv.Key.to_string path) (Int64.of_int size) in
+              (Mirage_kv.Key.to_string path) (Int64.of_int size) in
+          urls := Git.find_urls !urls path data;
           Some (Some Tar.Header.Ustar, hdr, once data)
         | Error _ -> None in
       let entries = Lwt_stream.filter_map_s to_entry entries in
@@ -638,12 +565,13 @@ module Make
     let of_git repo store =
       let now = Ptime.v (Pclock.now_d_ps ()) in
       let mtime = Option.value ~default:0 Ptime.(Span.to_int_s (to_span now)) in
-      entries_of_git ~mtime store repo >>= fun entries ->
+      let urls = ref SM.empty in
+      entries_of_git ~mtime store repo urls >>= fun entries ->
       let t = Tar.out ~level:Ustar entries in
       let t = Tar_gz.out_gzipped ~level:4 ~mtime:(Int32.of_int mtime) Gz.Unix t in
       let buf = Buffer.create 1024 in
       to_buffer buf t >|= function
-      | Ok () -> Buffer.contents buf
+      | Ok () -> Buffer.contents buf, !urls
       | Error (`Msg msg) -> failwith msg
   end
 
@@ -696,8 +624,8 @@ stamp: %S
       commit_id git_kv >>= fun commit_id ->
       modified git_kv >>= fun modified ->
       let repo = repo remote commit_id in
-      Tarball.of_git repo git_kv >|= fun index ->
-      { commit_id ; modified ; repo ; index }
+      Tarball.of_git repo git_kv >|= fun (index, urls) ->
+      { commit_id ; modified ; repo ; index }, urls
 
     let update_lock = Lwt_mutex.create ()
 
@@ -710,51 +638,87 @@ stamp: %S
             Lwt.return None
           | Ok [] ->
             Logs.info (fun m -> m "git changes are empty");
-            Lwt.return (Some [])
+            Lwt.return (Some ([], SM.empty))
           | Ok changes ->
             commit_id git_kv >>= fun commit_id ->
             modified git_kv >>= fun modified ->
             Logs.info (fun m -> m "git: %s" commit_id);
             let repo = repo remote commit_id in
-            Tarball.of_git repo git_kv >|= fun index ->
+            reset_parse_errors ();
+            Tarball.of_git repo git_kv >|= fun (index, urls) ->
             t.commit_id <- commit_id ;
             t.modified <- modified ;
             t.repo <- repo ;
             t.index <- index;
-            Some changes)
+            Some (changes, urls))
 
-    let status disk =
+    let status t disk =
       (* report status:
          - archive size (can we easily measure?) and number of "good" elements
          - list of current downloads
          - list of failed downloads
       *)
       let archive_stats =
-        Fmt.str "<ul><li>%u validated archives on disk</li><li>%Lu bytes free</li></ul>"
+        Fmt.str "<ul><li>commit %s</li><li>last modified %s</li><li>repo %s</li><li>%u validated archives on disk</li><li>%Lu bytes free</li></ul>"
+          t.commit_id t.modified (K.remote ())
           (SM.cardinal disk.Disk.md5s)
           (KV.free disk.Disk.dev)
       in
+      let sort_by_ts a b = Ptime.compare a b in
       let active_downloads =
         let header = "<h2>Active downloads</h2><ul>" in
         let content =
-          SM.fold (fun url (ts, bytes_written, length_or_unknown) acc ->
-              ("<li>" ^ Ptime.to_rfc3339 ?tz_offset_s:None ts ^ ": " ^ url ^ " " ^ string_of_int bytes_written ^ " bytes written to disk, " ^ length_or_unknown ^ "</li>")
-              ^ acc)
-            !active_downloads ""
+          SM.bindings !active_downloads |>
+          List.sort (fun (_, (a, _)) (_, (b, _)) -> sort_by_ts a b) |>
+          List.map (fun (url, (ts, bytes_written)) ->
+              "<li>" ^ Ptime.to_rfc3339 ?tz_offset_s:None ts ^ ": " ^ url ^ " " ^ string_of_int bytes_written ^ " bytes written to swap</li>")
         in
-        header ^ content ^ "</ul>"
+        header ^ String.concat "" content ^ "</ul>"
       and failed_downloads =
-        let header = "<h2>Failed downloads</h2><ul>" in
-        let content =
-          SM.fold (fun url (ts, reason) acc ->
-              ("<li>" ^ Ptime.to_rfc3339 ?tz_offset_s:None ts ^ ": " ^ url ^ " " ^ reason ^ "</li>")
-              ^ acc)
-            !failed_downloads ""
+        let header = "<h2>Failed downloads</h2>" in
+        let group_by xs =
+          let t = Hashtbl.create 7 in
+          List.iter (fun ((_, (_, reason)) as e) ->
+              let k = key_of_failed reason in
+              let els = Option.value ~default:[] (Hashtbl.find_opt t k) in
+              Hashtbl.replace t k (e :: els))
+            xs;
+          Hashtbl.fold (fun k els acc ->
+              let sorted =
+                List.sort (fun (_, (tsa, _)) (_, (tsb, _)) ->
+                    sort_by_ts tsa tsb)
+                  els
+              in
+              (k, sorted) :: acc)
+            t []
         in
-        header ^ content ^ "</ul>"
+        let content =
+          SM.bindings !failed_downloads |>
+          group_by |>
+          List.sort (fun (a, _) (b, _) -> compare_failed_key a b) |>
+          List.map (fun (key, els) ->
+              let header = Fmt.str "<h3>%a</h3><ul>" pp_key key in
+              let content =
+                List.map (fun (url, (ts, reason)) ->
+                    Fmt.str "<li>%s: %s error %a"
+                      (Ptime.to_rfc3339 ?tz_offset_s:None ts) url pp_failed reason)
+                  els
+              in
+              header ^ String.concat "" content ^ "</ul>")
+        in
+        header ^ String.concat "" content
+      and parse_errors =
+        let header = "<h2>Parse errors</h2><ul>" in
+        let content =
+          SM.bindings !parse_errors |>
+          List.sort (fun (a, _) (b, _) -> String.compare a b) |>
+          List.map (fun (filename, reason) ->
+              "<li>" ^ filename ^ ": " ^ reason ^ "</li>")
+        in
+        header ^ String.concat "" content ^ "</ul>"
       in
       "<html><head><title>Opam-mirror status page</title></head><body><h1>Opam mirror status</h1><div>"
-      ^ String.concat "</div><div>" [ archive_stats ; active_downloads ; failed_downloads ]
+      ^ String.concat "</div><div>" [ archive_stats ; active_downloads ; failed_downloads ; parse_errors ]
         ^ "</div></body></html>"
 
     let not_modified request (modified, etag) =
@@ -794,7 +758,6 @@ stamp: %S
         else *)
     let dispatch t store hook_url update _flow _conn reqd =
       let request = Httpaf.Reqd.request reqd in
-      Logs.info (fun f -> f "requested %s" request.Httpaf.Request.target);
       match String.split_on_char '/' request.Httpaf.Request.target with
       | [ ""; x ] when String.equal x hook_url ->
         Lwt.async update;
@@ -810,7 +773,7 @@ stamp: %S
         let resp = Httpaf.Response.create ~headers `OK in
         Httpaf.Reqd.respond_with_string reqd resp data
       | [ ""; x ] when String.equal x "status" ->
-        let data = status store in
+        let data = status t store in
         let mime_type = "text/html" in
         let headers = [
           "content-type", mime_type ;
@@ -857,15 +820,12 @@ stamp: %S
         begin
           match hash_of_string hash_algo with
           | Error `Msg msg ->
-            Logs.warn (fun m -> m "error decoding hash algo: %s" msg);
             not_found reqd request.Httpaf.Request.target
           | Ok h ->
             let hash = Mirage_kv.Key.v hash in
             Lwt.async (fun () ->
                 (Disk.last_modified store h hash >|= function
-                  | Error _ ->
-                    Logs.warn (fun m -> m "error retrieving last modified");
-                    t.modified
+                  | Error _ -> t.modified
                   | Ok v -> ptime_to_http_date v) >>= fun last_modified ->
                 if not_modified request (last_modified, Mirage_kv.Key.basename hash) then
                   let resp = Httpaf.Response.create `Not_modified in
@@ -874,7 +834,6 @@ stamp: %S
                 else
                   Disk.size store h hash >>= function
                   | Error _ ->
-                    Logs.warn (fun m -> m "error retrieving size");
                     not_found reqd request.Httpaf.Request.target;
                     Lwt.return_unit
                   | Ok size ->
@@ -904,54 +863,39 @@ stamp: %S
 
   end
 
-  let bad_archives = SSet.of_list Bad.archives
-
-  let download_archives parallel_downloads disk http_client store =
+  let download_archives parallel_downloads disk http_client urls =
     (* FIXME: handle resuming partial downloads *)
-    Git.find_urls store >>= fun urls ->
-    let urls = SM.filter (fun k _ -> not (SSet.mem k bad_archives)) urls in
+    reset_failed_downloads ();
     let pool = Lwt_pool.create parallel_downloads (Fun.const Lwt.return_unit) in
-    let idx = ref 0 in
     Lwt_list.iter_p (fun (url, csums) ->
         Lwt_pool.use pool @@ fun () ->
-        (* FIXME: check pending and to-delete *)
         HM.fold (fun h v r ->
             r >>= function
             | true -> Disk.exists disk h (hex_to_key v)
             | false -> Lwt.return false)
           csums (Lwt.return true) >>= function
-        | true ->
-          Logs.debug (fun m -> m "ignoring %s (already present)" url);
-          Lwt.return_unit
+        | true -> Lwt.return_unit
         | false ->
-          incr idx;
-          if !idx mod 10 = 0 then Gc.full_major () ;
-          Logs.info (fun m -> m "downloading %s" url);
-          let quux, body_init = Archive_checksum.init_write csums in
+          let quux, body_init = Disk.init_write disk csums in
           add_to_active url (Ptime.v (Pclock.now_d_ps ()));
           Http_mirage_client.request http_client url (Disk.write_partial disk quux url) body_init >>= function
           | Ok (resp, r) ->
             begin match r with
               | Error `Bad_response ->
-                Logs.warn (fun m -> m "%s: %a (reason %s)"
-                              url H2.Status.pp_hum resp.status resp.reason);
                 add_failed url (Ptime.v (Pclock.now_d_ps ()))
-                  (Fmt.str "%a %s" H2.Status.pp_hum resp.status resp.reason);
+                  (`Bad_response (resp.status, resp.reason));
                 Lwt.return_unit
               | Error `Write_error e ->
-                Logs.err (fun m -> m "%s: write error %a %a"
-                              url
-                              Mirage_kv.Key.pp (Disk.pending_key quux)
-                              KV.pp_write_error e);
-                add_failed url (Ptime.v (Pclock.now_d_ps ()))
-                  (Fmt.str "write error: %a" KV.pp_write_error e);
+                add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Write_error e);
+                Lwt.return_unit
+              | Error `Swap e ->
+                add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Swap e);
                 Lwt.return_unit
               | Ok (digests, body) ->
                 Disk.finalize_write disk quux ~url body csums digests
             end
           | Error me ->
-            add_failed url (Ptime.v (Pclock.now_d_ps ()))
-              (Fmt.str "mimic error: %a" Mimic.pp_error me);
+            add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Mimic me);
             Lwt.return_unit)
       (SM.bindings urls) >>= fun () ->
     Disk.update_caches disk >|= fun () ->
@@ -980,13 +924,14 @@ stamp: %S
 
   module Paf = Paf_mirage.Make(Stack.TCP)
 
-  let start_mirror { Part.tar; git_dump; md5s; sha512s } stack git_ctx http_ctx =
+  let start_mirror { Part.tar; swap; git_dump; md5s; sha512s } stack git_ctx http_ctx =
     KV.connect tar >>= fun kv ->
     Cache.connect git_dump >>= fun git_dump ->
     Cache.connect md5s >>= fun md5s ->
     Cache.connect sha512s >>= fun sha512s ->
+    Swap.connect swap >>= fun swap ->
     Logs.info (fun m -> m "Available bytes in tar storage: %Ld" (KV.free kv));
-    Disk.init ~verify_sha256:(K.verify_sha256 ()) kv md5s sha512s >>= fun disk ->
+    Disk.init ~verify_sha256:(K.verify_sha256 ()) kv md5s sha512s swap >>= fun disk ->
     let remote = K.remote () in
     if K.check () then
       Lwt.return_unit
@@ -1006,14 +951,14 @@ stamp: %S
       Logs.info (fun m -> m "Done initializing git state!");
       Serve.commit_id git_kv >>= fun commit_id ->
       Logs.info (fun m -> m "git: %s" commit_id);
-      Serve.create remote git_kv >>= fun serve ->
+      Serve.create remote git_kv >>= fun (serve, urls) ->
       Paf.init ~port:(K.port ()) (Stack.tcp stack) >>= fun t ->
       let update () =
         Serve.update_git ~remote serve git_kv >>= function
-        | None | Some [] -> Lwt.return_unit
-        | Some _changes ->
+        | None | Some ([], _) -> Lwt.return_unit
+        | Some (_changes, urls) ->
           dump_git git_dump git_kv >>= fun () ->
-          download_archives (K.parallel_downloads ()) disk http_ctx git_kv
+          download_archives (K.parallel_downloads ()) disk http_ctx urls
       in
       let service =
         Paf.http_service
@@ -1029,15 +974,16 @@ stamp: %S
             go ()
           in
           go ());
-      download_archives (K.parallel_downloads ()) disk http_ctx git_kv >>= fun () ->
+      download_archives (K.parallel_downloads ()) disk http_ctx urls >>= fun () ->
       (th >|= fun _v -> ())
 
   let start block _time _pclock stack git_ctx http_ctx =
     let initialize_disk = K.initialize_disk ()
     and sectors_cache = K.sectors_cache ()
-    and sectors_git = K.sectors_git () in
+    and sectors_git = K.sectors_git ()
+    and sectors_swap = K.sectors_swap () in
     if initialize_disk then
-      Part.format block ~sectors_cache ~sectors_git >>= function
+      Part.format block ~sectors_cache ~sectors_git ~sectors_swap >>= function
       | Ok () ->
         Logs.app (fun m -> m "Successfully initialized the disk! You may restart now without --initialize-disk.");
         Lwt.return_unit
