@@ -664,7 +664,7 @@ stamp: %S
           (SM.cardinal disk.Disk.md5s)
           (KV.free disk.Disk.dev)
       in
-      let sort_by_ts a b = Ptime.compare a b in
+      let sort_by_ts a b = Ptime.compare b a in
       let active_downloads =
         let header = "<h2>Active downloads</h2><ul>" in
         let content =
