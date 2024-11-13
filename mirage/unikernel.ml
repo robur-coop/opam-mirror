@@ -309,12 +309,15 @@ module Make
       (* XXX: we may be in trouble if different hash functions are used for the same archive *)
       let ( >>>= ) = Lwt_result.bind in
       fun response r data ->
-        Lwt.return r >>>= fun (digests, swap) ->
-        let digests = Archive_checksum.update_digests digests data in
-        active_add_bytes url (String.length data);
-        Swap.append swap data >|= function
-        | Ok () -> Ok (digests, swap)
-        | Error swap_err -> Error (`Swap swap_err)
+        if Http_mirage_client.Status.is_successful response.Http_mirage_client.status then
+          Lwt.return r >>>= fun (digests, swap) ->
+          let digests = Archive_checksum.update_digests digests data in
+          active_add_bytes url (String.length data);
+          Swap.append swap data >|= function
+          | Ok () -> Ok (digests, swap)
+          | Error swap_err -> Error (`Swap swap_err)
+        else
+          Lwt.return (Error `Bad_response)
 
     let check_csums_digests csums digests =
       let csums' = Archive_checksum.digests_to_hm digests in
