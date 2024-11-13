@@ -590,7 +590,7 @@ module Make
 
     let commit_id git_kv =
       Store.digest git_kv Mirage_kv.Key.empty >|= fun r ->
-      Result.fold r ~ok:Fun.id
+      Result.fold r ~ok:Ohex.encode
         ~error:(fun e ->
             Logs.err (fun m -> m "%a" Store.pp_error e);
             exit 2)
