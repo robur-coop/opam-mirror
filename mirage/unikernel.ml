@@ -229,6 +229,14 @@ module Make
     | `Bad_response -> Fmt.pf ppf "Bad response"
     | `Mimic -> Fmt.pf ppf "Mimic"
 
+  let remaining_downloads = ref 0
+
+  let archives = ref 0
+
+  let last_git = ref Ptime.epoch
+
+  let last_git_status = ref (Error "unknown")
+
   module Disk = struct
     type t = {
       mutable md5s : string SM.t ;
@@ -635,14 +643,18 @@ stamp: %S
     let update_git ~remote t git_kv =
       Lwt_mutex.with_lock update_lock (fun () ->
           Logs.info (fun m -> m "pulling the git repository");
+          last_git := Ptime.v (Pclock.now_d_ps ());
           Git_kv.pull git_kv >>= function
           | Error `Msg msg ->
             Logs.err (fun m -> m "error %s while updating git" msg);
+            last_git_status := Error msg;
             Lwt.return None
           | Ok [] ->
             Logs.info (fun m -> m "git changes are empty");
+            last_git_status := Ok 0;
             Lwt.return (Some ([], SM.empty))
           | Ok changes ->
+            last_git_status := Ok (List.length changes);
             commit_id git_kv >>= fun commit_id ->
             modified git_kv >>= fun modified ->
             Logs.info (fun m -> m "git: %s" commit_id);
@@ -658,14 +670,16 @@ stamp: %S
     let status t disk =
       (* report status:
          - archive size (can we easily measure?) and number of "good" elements
-         - list of current downloads
-         - list of failed downloads
       *)
       let archive_stats =
-        Fmt.str "<ul><li>commit %s</li><li>last modified %s</li><li>repo %s</li><li>%u validated archives on disk</li><li>%Lu bytes free</li></ul>"
+        Fmt.str "<ul><li>commit %s</li><li>last modified (of index.tar.gz) %s</li><li>repo %s</li><li>%u validated archives on disk</li><li>%Lu bytes free</li><li>%u URLs identified</li><li>%u downloads are remaining</li><li>last git fetch %s</li><li>last git status: %s</li></ul>"
           t.commit_id t.modified (K.remote ())
           (SM.cardinal disk.Disk.md5s)
           (KV.free disk.Disk.dev)
+          !archives
+          !remaining_downloads
+          (Ptime.to_rfc3339 ?tz_offset_s:None !last_git)
+          (match !last_git_status with Ok x -> "ok with " ^ string_of_int x ^ " changes" | Error msg -> "error " ^ msg)
       in
       let sort_by_ts a b = Ptime.compare b a in
       let active_downloads =
@@ -869,6 +883,8 @@ stamp: %S
   let download_archives parallel_downloads disk http_client urls =
     (* FIXME: handle resuming partial downloads *)
     reset_failed_downloads ();
+    remaining_downloads := SM.cardinal urls;
+    archives := SM.cardinal urls;
     let pool = Lwt_pool.create parallel_downloads (Fun.const Lwt.return_unit) in
     Lwt_list.iter_p (fun (url, csums) ->
         Lwt_pool.use pool @@ fun () ->
@@ -877,12 +893,15 @@ stamp: %S
             | true -> Disk.exists disk h (hex_to_key v)
             | false -> Lwt.return false)
           csums (Lwt.return true) >>= function
-        | true -> Lwt.return_unit
+        | true ->
+          decr remaining_downloads;
+          Lwt.return_unit
         | false ->
           let quux, body_init = Disk.init_write disk csums in
           add_to_active url (Ptime.v (Pclock.now_d_ps ()));
           Http_mirage_client.request http_client url (Disk.write_partial disk quux url) body_init >>= function
           | Ok (resp, r) ->
+            decr remaining_downloads;
             begin match r with
               | Error `Bad_response ->
                 add_failed url (Ptime.v (Pclock.now_d_ps ()))
@@ -898,6 +917,7 @@ stamp: %S
                 Disk.finalize_write disk quux ~url body csums digests
             end
           | Error me ->
+            decr remaining_downloads;
             add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Mimic me);
             Lwt.return_unit)
       (SM.bindings urls) >>= fun () ->
