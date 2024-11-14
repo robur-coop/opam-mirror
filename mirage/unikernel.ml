@@ -9,6 +9,10 @@ module K = struct
     let doc = Arg.info ~doc:"Only check the cache" ["check"] in
     Mirage_runtime.register_arg Arg.(value & flag doc)
 
+  let skip_download =
+    let doc = Arg.info ~doc:"Skip downloading archives" ["skip-download"] in
+    Mirage_runtime.register_arg Arg.(value & flag doc)
+
   let upstream_caches =
     let doc = Arg.info ~doc:"Upstream caches (e.g. https://opam.ocaml.org/cache)" ["upstream-cache"] in
     Mirage_runtime.register_arg Arg.(value & opt_all string [] doc)
@@ -136,6 +140,10 @@ module Make
       in
       Lwt_stream.from more
 
+    let sha256s = Hashtbl.create 13
+
+    let empty () = Hashtbl.clear sha256s
+
     let find_urls acc path data =
       if Mirage_kv.Key.basename path = "opam" then
         let path = Mirage_kv.Key.to_string path in
@@ -156,8 +164,25 @@ module Make
             if HM.cardinal csums = 0 then
               (add_parse_error path ("no checksums for " ^ url);
                acc)
-            else
+            else begin
+              let url' =
+                match HM.find_opt `SHA256 csums with
+                | None -> url
+                | Some hash ->
+                  match Hashtbl.find_opt sha256s hash with
+                  | None -> Hashtbl.add sha256s hash url; url
+                  | Some url' ->
+                    if not (String.equal url url') then
+                      Logs.warn (fun m -> m "same hash for url %s and %s" url url');
+                    url'
+              in
               let mirrors = SSet.of_list mirrors in
+              let url, mirrors =
+                if String.equal url url' then
+                  url, mirrors
+                else
+                  url', SSet.add url mirrors
+              in
               SM.update url (function
                   | None -> Some (csums, SSet.union mirrors (upstream csums))
                   | Some (csums', mirrors') ->
@@ -173,7 +198,8 @@ module Make
                                               "mismatching hashes for %s: %s vs %s"
                                               url (hm_to_s csums') (hm_to_s csums));
                       None
-                    end) acc) acc url_csums
+                    end) acc
+            end) acc url_csums
       else
         acc
 
@@ -271,6 +297,7 @@ module Make
       { md5s = SM.empty ; sha512s = SM.empty ; checked = Some KS.empty ; dev; dev_md5s; dev_sha512s ; dev_swap }
 
     let add_checked t path =
+      Logs.info (fun m -> m "add checked %a" Mirage_kv.Key.pp path);
       match t.checked with
       | None -> ()
       | Some s -> t.checked <- Some (KS.add path s)
@@ -620,6 +647,7 @@ module Make
       let mtime = Option.value ~default:0 Ptime.(Span.to_int_s (to_span now)) in
       let urls = ref SM.empty in
       entries_of_git ~mtime store repo urls >>= fun entries ->
+      Git.empty ();
       let t = Tar.out ~level:Ustar entries in
       let t = Tar_gz.out_gzipped ~level:4 ~mtime:(Int32.of_int mtime) Gz.Unix t in
       let buf = Buffer.create 1024 in
@@ -944,6 +972,7 @@ stamp: %S
           Lwt.return_unit
         | false ->
           let rec download url mirrors =
+            Logs.info (fun m -> m "downloading %s (%u mirrors)" url (SSet.cardinal mirrors));
             let retry () =
               if SSet.is_empty mirrors then begin
                 decr remaining_downloads;
@@ -957,25 +986,28 @@ stamp: %S
             in
             let quux, body_init = Disk.init_write disk csums in
             add_to_active url (Ptime.v (Pclock.now_d_ps ()));
-            Http_mirage_client.request http_client url (Disk.write_partial disk quux url) body_init >>= function
-            | Ok (resp, r) ->
-              begin match r with
-                | Error `Bad_response ->
-                  add_failed url (Ptime.v (Pclock.now_d_ps ()))
-                    (`Bad_response (resp.status, resp.reason));
-                  retry ()
-                | Error `Write_error e ->
-                  add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Write_error e);
-                  retry ()
-                | Error `Swap e ->
-                  add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Swap e);
-                  retry ()
-                | Ok (digests, body) ->
-                  decr remaining_downloads;
-                  Disk.finalize_write disk quux ~url body csums digests
-              end
-            | Error me ->
-              add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Mimic me);
+            if not (K.skip_download ()) then
+              Http_mirage_client.request http_client url (Disk.write_partial disk quux url) body_init >>= function
+              | Ok (resp, r) ->
+                begin match r with
+                  | Error `Bad_response ->
+                    add_failed url (Ptime.v (Pclock.now_d_ps ()))
+                      (`Bad_response (resp.status, resp.reason));
+                    retry ()
+                  | Error `Write_error e ->
+                    add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Write_error e);
+                    retry ()
+                  | Error `Swap e ->
+                    add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Swap e);
+                    retry ()
+                  | Ok (digests, body) ->
+                    decr remaining_downloads;
+                    Disk.finalize_write disk quux ~url body csums digests
+                end
+              | Error me ->
+                add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Mimic me);
+                retry ()
+            else
               retry ()
           in
           download url mirrors)
