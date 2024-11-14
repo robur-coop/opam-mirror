@@ -678,7 +678,7 @@ stamp: %S
           (KV.free disk.Disk.dev)
           !archives
           !remaining_downloads
-          (Ptime.to_rfc3339 ?tz_offset_s:None !last_git)
+          (ptime_to_http_date !last_git)
           (match !last_git_status with Ok x -> "ok with " ^ string_of_int x ^ " changes" | Error msg -> "error " ^ msg)
       in
       let sort_by_ts a b = Ptime.compare b a in
