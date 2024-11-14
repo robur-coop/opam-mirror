@@ -238,10 +238,12 @@ module Make
   let last_git_status = ref (Error "unknown")
 
   module Disk = struct
+    module KS = Set.Make(Mirage_kv.Key)
+
     type t = {
       mutable md5s : string SM.t ;
       mutable sha512s : string SM.t ;
-      mutable checked : bool ;
+      mutable checked : KS.t option ;
       dev : KV.t ;
       dev_md5s : Cache.t ;
       dev_sha512s : Cache.t ;
@@ -249,9 +251,12 @@ module Make
     }
 
     let empty dev dev_md5s dev_sha512s dev_swap =
-      { md5s = SM.empty ; sha512s = SM.empty ; checked = false ; dev; dev_md5s; dev_sha512s ; dev_swap }
+      { md5s = SM.empty ; sha512s = SM.empty ; checked = Some KS.empty ; dev; dev_md5s; dev_sha512s ; dev_swap }
 
-    let ready t = t.checked
+    let add_checked t path =
+      match t.checked with
+      | None -> ()
+      | Some s -> t.checked <- Some (KS.add path s)
 
     let marshal_sm (sm : string SM.t) =
       let version = char_of_int 1 in
@@ -290,6 +295,15 @@ module Make
         with
         | None -> Error `Not_found
         | Some x -> Ok x
+
+    let ready t h key =
+      match t.checked with
+      | None -> true
+      | Some s -> match find_key t h key with
+        | Ok k -> KS.mem k s
+        | Error _ -> false
+
+    let completely_checked t = t.checked = None
 
     let read_chunked t h v f a =
       match find_key t h v with
@@ -388,7 +402,8 @@ module Make
         | Ok () ->
           remove_active url;
           t.md5s <- SM.add md5 sha256 t.md5s;
-          t.sha512s <- SM.add sha512 sha256 t.sha512s
+          t.sha512s <- SM.add sha512 sha256 t.sha512s;
+          add_checked t dest
         | Error `Write_error e -> add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Write_error e)
         | Error `Swap e -> add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Swap e)
       else begin
@@ -462,7 +477,9 @@ module Make
                   None
               in
               match sha256_final with
-              | None -> Lwt.return_unit
+              | None ->
+                add_checked t path;
+                Lwt.return_unit
               | Some f ->
                 read_chunked t `SHA256 path
                   (fun (sha256, md5, sha512) data ->
@@ -488,11 +505,12 @@ module Make
                   else begin
                     Option.iter (fun f -> f (Option.get md5)) md5_final;
                     Option.iter (fun f -> f (Option.get sha512)) sha512_final;
+                    add_checked t path;
                     Lwt.return_unit
                   end)
           entries >>= fun () ->
         update_caches t >|= fun () ->
-        t.checked <- true
+        t.checked <- None
 
     let exists t h v =
       match find_key t h v with
@@ -848,7 +866,7 @@ stamp: %S
           | Ok h ->
             let hash = Mirage_kv.Key.v hash in
             Lwt.async (fun () ->
-                if Disk.ready store then
+                if Disk.ready store h hash then
                   (Disk.last_modified store h hash >|= function
                     | Error _ -> t.modified
                     | Ok v -> ptime_to_http_date v) >>= fun last_modified ->
@@ -990,7 +1008,7 @@ stamp: %S
       Serve.create remote git_kv >>= fun (serve, urls) ->
       Paf.init ~port:(K.port ()) (Stack.tcp stack) >>= fun t ->
       let update () =
-        if Disk.ready disk then
+        if Disk.completely_checked disk then
           Serve.update_git ~remote serve git_kv >>= function
           | None | Some ([], _) -> Lwt.return_unit
           | Some (_changes, urls) ->
