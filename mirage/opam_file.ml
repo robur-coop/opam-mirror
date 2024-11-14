@@ -35,12 +35,31 @@ let extract_url_checksum filename items =
     List.find_opt
       (function { pelem = Variable ({ pelem = "checksum" ; _ }, _); _ } -> true | _ -> false)
       items
+  and mirrors =
+    List.find_opt
+      (function { pelem = Variable ({ pelem = "mirrors" ; _ }, _); _ } -> true | _ -> false)
+      items
   in
   let url =
     match url, archive with
     | Some { pelem = Variable (_, { pelem = String url ; _ }) ; _ }, None -> Ok url
     | None, Some { pelem = Variable (_, { pelem = String url ; _ }); _ } -> Ok url
     | _ -> Error (`Msg "neither 'src' nor 'archive' present")
+  and mirrors = match mirrors with
+    | None -> []
+    | Some { pelem = Variable (_, { pelem = String url ; _ }) ; _ } -> [ url ]
+    | Some { pelem = Variable (_, { pelem = List { pelem = urls ; _ } ; _ }) } ->
+      List.fold_left (fun acc -> function
+          | { pelem = String url ; _ } -> url :: acc
+          | v ->
+            Logs.err (fun m -> m "bad mirror data (expected a string in the list): %s"
+                         (OpamPrinter.FullPos.value v));
+            acc)
+        [] urls
+    | Some v ->
+      Logs.err (fun m -> m "bad mirror data (expected string or string list): %s"
+                   (OpamPrinter.FullPos.items [ v ]));
+      []
   in
   let csum, csum_errs =
     match checksum with
@@ -79,7 +98,7 @@ let extract_url_checksum filename items =
     | _ -> Error (`Msg "couldn't find or decode 'checksum'"), []
   in
   (match url, csum with
-   | Ok url, Ok csum -> Ok (url, csum)
+   | Ok url, Ok csum -> Ok (url, csum, mirrors)
    | Error _ as e, _
    | _, (Error _ as e) -> e), csum_errs
 

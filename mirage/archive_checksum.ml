@@ -1,5 +1,3 @@
-
-
 module Hash = struct
   type t = (* OpamHash.kind = *) [ `MD5 | `SHA256 | `SHA512 ]
 
