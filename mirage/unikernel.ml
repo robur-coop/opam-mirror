@@ -173,7 +173,7 @@ module Make
                   | None -> Hashtbl.add sha256s hash url; url
                   | Some url' ->
                     if not (String.equal url url') then
-                      Logs.warn (fun m -> m "same hash for url %s and %s" url url');
+                      Logs.debug (fun m -> m "same hash for url %s and %s" url url');
                     url'
               in
               let mirrors = SSet.of_list mirrors in
@@ -297,7 +297,6 @@ module Make
       { md5s = SM.empty ; sha512s = SM.empty ; checked = Some KS.empty ; dev; dev_md5s; dev_sha512s ; dev_swap }
 
     let add_checked t path =
-      Logs.info (fun m -> m "add checked %a" Mirage_kv.Key.pp path);
       match t.checked with
       | None -> ()
       | Some s -> t.checked <- Some (KS.add path s)
@@ -972,7 +971,6 @@ stamp: %S
           Lwt.return_unit
         | false ->
           let rec download url mirrors =
-            Logs.info (fun m -> m "downloading %s (%u mirrors)" url (SSet.cardinal mirrors));
             let retry () =
               if SSet.is_empty mirrors then begin
                 decr remaining_downloads;
