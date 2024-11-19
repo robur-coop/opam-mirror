@@ -158,7 +158,8 @@ module Make
         let url_csums, errs = Opam_file.extract_urls path data in
         List.iter (fun (`Msg msg) -> add_parse_error path msg) errs;
         let upstream hm =
-          List.fold_left (fun set (hash, hash_value) ->
+          HM.fold
+          (fun hash hash_value set ->
               List.fold_left (fun set cache_url ->
                   let url =
                     cache_url ^ "/" ^ Archive_checksum.Hash.to_string hash ^
@@ -166,7 +167,7 @@ module Make
                   in
                   SSet.add url set)
                 set (K.upstream_caches ()))
-            SSet.empty (HM.bindings hm)
+            hm SSet.empty
         in
         List.fold_left (fun acc (url, csums, mirrors) ->
             if HM.cardinal csums = 0 then
