@@ -14,7 +14,15 @@ module K = struct
     Mirage_runtime.register_arg Arg.(value & flag doc)
 
   let upstream_caches =
-    let doc = Arg.info ~doc:"Upstream caches (e.g. https://opam.ocaml.org/cache)" ["upstream-cache"] in
+    let doc =
+      "Upstream caches (e.g. https://opam.ocaml.org/cache). \
+       For each package first the declared url is attempted. Then, \
+       if any, all the declared mirrors are attempted. \
+       Finally, the upstream caches are attempted. \
+       Note that this does not change the \"archive-mirrors:\" value \
+       in the /repo endpoint."
+    in
+    let doc = Arg.info ~doc ["upstream-cache"] in
     Mirage_runtime.register_arg Arg.(value & opt_all string [] doc)
 
   let skip_verify_sha256 =
@@ -184,15 +192,17 @@ module Make
                   url', SSet.add url mirrors
               in
               SM.update url (function
-                  | None -> Some (csums, SSet.union mirrors (upstream csums))
-                  | Some (csums', mirrors') ->
+                  | None -> Some (csums, mirrors, upstream csums)
+                  | Some (csums', mirrors', upstream_caches') ->
                     if HM.for_all (fun h v ->
                         match HM.find_opt h csums with
                         | None -> true | Some v' -> String.equal v v')
                         csums'
                     then
                       Some (HM.union (fun _h v _v' -> Some v) csums csums',
-                            SSet.union mirrors mirrors')
+                            SSet.union mirrors mirrors',
+                            SSet.union (upstream csums) upstream_caches'
+                           )
                     else begin
                       add_parse_error path (Fmt.str
                                               "mismatching hashes for %s: %s vs %s"
@@ -959,7 +969,7 @@ stamp: %S
     remaining_downloads := SM.cardinal urls;
     archives := SM.cardinal urls;
     let pool = Lwt_pool.create parallel_downloads (Fun.const Lwt.return_unit) in
-    Lwt_list.iter_p (fun (url, (csums, mirrors)) ->
+    Lwt_list.iter_p (fun (url, (csums, mirrors, upstream_caches)) ->
         Lwt_pool.use pool @@ fun () ->
         HM.fold (fun h v r ->
             r >>= function
@@ -970,17 +980,23 @@ stamp: %S
           decr remaining_downloads;
           Lwt.return_unit
         | false ->
-          let rec download url mirrors =
+          let rec download url mirrors upstream_caches =
             let retry () =
-              if SSet.is_empty mirrors then begin
+              if SSet.is_empty mirrors && SSet.is_empty upstream_caches then begin
                 decr remaining_downloads;
                 Lwt.return_unit
-              end else
+              end else if SSet.is_empty mirrors then
+                let elt, upstream_caches =
+                  let e = SSet.min_elt upstream_caches in
+                  e, SSet.remove e upstream_caches
+                in
+                download elt mirrors upstream_caches
+              else
                 let elt, mirrors =
                   let e = SSet.min_elt mirrors in
                   e, SSet.remove e mirrors
                 in
-                download elt mirrors
+                download elt mirrors upstream_caches
             in
             let quux, body_init = Disk.init_write disk csums in
             add_to_active url (Ptime.v (Pclock.now_d_ps ()));
@@ -1008,7 +1024,7 @@ stamp: %S
             else
               retry ()
           in
-          download url mirrors)
+          download url mirrors upstream_caches)
       (SM.bindings urls) >>= fun () ->
     Disk.update_caches disk >|= fun () ->
     Logs.info (fun m -> m "downloading of %d urls done" (SM.cardinal urls))
