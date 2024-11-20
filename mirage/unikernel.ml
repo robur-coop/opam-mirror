@@ -537,10 +537,17 @@ module Make
               | Some f ->
                 read_chunked t `SHA256 path
                   (fun (sha256, md5, sha512) data ->
-                     Lwt.return
-                       (SHA256.feed_string sha256 data,
-                        Option.map (fun t -> MD5.feed_string t data) md5,
-                        Option.map (fun t -> SHA512.feed_string t data) sha512))
+                     let sha256 = SHA256.feed_string sha256 data in
+                     Lwt.pause () >>= fun () ->
+                     let md5 =
+                       Option.map (fun t -> MD5.feed_string t data) md5
+                     in
+                     Lwt.pause () >>= fun () ->
+                     let sha512 =
+                       Option.map (fun t -> SHA512.feed_string t data) sha512
+                     in
+                     Lwt.pause () >|= fun () ->
+                     sha256, md5, sha512)
                   (SHA256.empty,
                    Option.map (fun _ -> MD5.empty) md5_final,
                    Option.map (fun _ -> SHA512.empty) sha512_final) >>= function
