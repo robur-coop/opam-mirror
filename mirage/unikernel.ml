@@ -59,20 +59,20 @@ module K = struct
     let doc = Arg.info ~doc:"HTTP listen port." ["port"] in
     Mirage_runtime.register_arg Arg.(value & opt int 80 doc)
 
-  let sectors_cache =
-    let doc = "Number of sectors reserved for each checksum cache (md5, sha512). Only used with --initialize-disk." in
-    let doc = Arg.info ~doc ["sectors-cache"] in
-    Mirage_runtime.register_arg Arg.(value & opt int64 Int64.(mul 4L 2048L) doc)
+  let cache_size =
+    let doc = "Number of MB reserved for each checksum cache (md5, sha512). Only used with --initialize-disk." in
+    let doc = Arg.info ~doc ["cache-size"] in
+    Mirage_runtime.register_arg Arg.(value & opt int 4 doc)
 
-  let sectors_git =
-    let doc = "Number of sectors reserved for git dump. Only used with --initialize-disk" in
-    let doc = Arg.info ~doc ["sectors-git"] in
-    Mirage_runtime.register_arg Arg.(value & opt int64 Int64.(mul 40L (mul 2L 1024L)) doc)
+  let git_size =
+    let doc = "Number of MB reserved for git dump. Only used with --initialize-disk" in
+    let doc = Arg.info ~doc ["git-size"] in
+    Mirage_runtime.register_arg Arg.(value & opt int 40 doc)
 
-  let sectors_swap =
-    let doc = "Number of sectors reserved for swap. Only used with --initialize-disk" in
-    let doc = Arg.info ~doc ["sectors-swap"] in
-    Mirage_runtime.register_arg Arg.(value & opt int64 Int64.(mul 1024L 2048L) doc)
+  let swap_size =
+    let doc = "Number of MB reserved for swap. Only used with --initialize-disk" in
+    let doc = Arg.info ~doc ["swap-size"] in
+    Mirage_runtime.register_arg Arg.(value & opt int 1024 doc)
 
   let initialize_disk =
     let doc = "Initialize the disk with a partition table. THIS IS DESTRUCTIVE!" in
@@ -1123,11 +1123,11 @@ stamp: %S
 
   let start block _time _pclock stack git_ctx http_ctx =
     let initialize_disk = K.initialize_disk ()
-    and sectors_cache = K.sectors_cache ()
-    and sectors_git = K.sectors_git ()
-    and sectors_swap = K.sectors_swap () in
+    and cache_size = K.cache_size ()
+    and git_size = K.git_size ()
+    and swap_size = K.swap_size () in
     if initialize_disk then
-      Part.format block ~sectors_cache ~sectors_git ~sectors_swap >>= function
+      Part.format block ~cache_size ~git_size ~swap_size >>= function
       | Ok () ->
         Logs.app (fun m -> m "Successfully initialized the disk! You may restart now without --initialize-disk.");
         Lwt.return_unit

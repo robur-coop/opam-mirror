@@ -101,7 +101,7 @@ module Make(BLOCK : Mirage_block.S) = struct
     and md5s = get_part md5s and sha512s = get_part sha512s in
     { tar ; swap; git_dump ; md5s ; sha512s }
 
-  let format block ~sectors_cache ~sectors_git ~sectors_swap =
+  let format block ~cache_size ~git_size ~swap_size =
     let* { size_sectors; sector_size; _ } = BLOCK.get_info block in
     let ( let*? ) = Lwt_result.bind in
     (* ocaml-gpt uses a fixed size partition entries table. Create an empty GPT
@@ -109,6 +109,16 @@ module Make(BLOCK : Mirage_block.S) = struct
     let empty =
       Gpt.make ~sector_size ~disk_sectors:size_sectors []
       |> Result.get_ok
+    in
+    let mb_in_sectors mb =
+      (* 1 megabyte is 2^20 bytes (1024 * 1024) *)
+      let mb_in_bytes = Int64.(shift_left (of_int mb) 20) in
+      let ss = Int64.of_int sector_size in
+      Int64.(div (add mb_in_bytes (sub ss 1L)) ss)
+    in
+    let sectors_cache = mb_in_sectors cache_size
+    and sectors_git = mb_in_sectors git_size
+    and sectors_swap = mb_in_sectors swap_size
     in
     let*? () =
       if size_sectors <
@@ -175,9 +185,9 @@ module Make(BLOCK : Mirage_block.S) = struct
       Gpt.make ~sector_size ~disk_sectors:size_sectors partitions
       |> Result.get_ok
     in
-  let buf =
-    Cstruct.create (sector_size * (Int64.to_int gpt.first_usable_lba + 2 * Tar.Header.length))
-  in
+    let buf =
+      Cstruct.create (sector_size * (Int64.to_int gpt.first_usable_lba + 2 * Tar.Header.length))
+    in
     Gptar.marshal_header ~sector_size buf gpt;
     Gpt.marshal_partition_table ~sector_size
       (Cstruct.shift buf (sector_size * Int64.to_int gpt.partition_entry_lba))
