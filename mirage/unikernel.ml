@@ -59,6 +59,11 @@ module K = struct
     let doc = Arg.info ~doc:"HTTP listen port." ["port"] in
     Mirage_runtime.register_arg Arg.(value & opt int 80 doc)
 
+  let index_size =
+    let doc = "Number of MB reserved for the index tarball. Only used with --initialize-disk." in
+    let doc = Arg.info ~doc ["index-size"] in
+    Mirage_runtime.register_arg Arg.(value & opt int 10 doc)
+
   let cache_size =
     let doc = "Number of MB reserved for each checksum cache (md5, sha512). Only used with --initialize-disk." in
     let doc = Arg.info ~doc ["cache-size"] in
@@ -718,6 +723,46 @@ stamp: %S
       mutable index : string ;
     }
 
+    let to_string { commit_id ; modified ; repo ; index } =
+      String.concat ";" [ commit_id ; modified ; repo ; index ]
+
+    let of_string str =
+      match String.index_opt str ';' with
+      | None -> Error (`Msg "no separator found")
+      | Some commit_end ->
+        match String.index_from_opt str (succ commit_end) ';' with
+        | None -> Error (`Msg "no separator found")
+        | Some modified_end ->
+          match String.index_from_opt str (succ modified_end) ';' with
+          | None -> Error (`Msg "no separator found")
+          | Some repo_end ->
+            let last_chunk = String.length str - succ repo_end in
+            Ok { commit_id = String.sub str 0 commit_end ;
+                 modified = String.sub str (succ commit_end) modified_end ;
+                 repo = String.sub str (succ modified_end) repo_end ;
+                 index = String.sub str (succ repo_end) last_chunk }
+
+    let dump_index index_dump t =
+      let data = to_string t in
+      Cache.write index_dump data >|= function
+      | Ok () ->
+        Logs.info (fun m -> m "dumped index %d bytes" (String.length data))
+      | Error e ->
+        Logs.warn (fun m -> m "failed to dump index: %a" Cache.pp_write_error e)
+
+    let restore_index index_dump =
+      Cache.read index_dump >|= function
+      | Ok None -> Error ()
+      | Error e ->
+        Logs.warn (fun m -> m "failed to read index state: %a" Cache.pp_error e);
+        Error ()
+      | Ok Some data ->
+        match of_string data with
+        | Error `Msg msg ->
+          Logs.warn (fun m -> m "failed to decode index: %s" msg);
+          Error ()
+        | Ok t -> Ok t
+
     let create remote git_kv =
       commit_id git_kv >>= fun commit_id ->
       modified git_kv >>= fun modified ->
@@ -1063,11 +1108,12 @@ stamp: %S
 
   module Paf = Paf_mirage.Make(Stack.TCP)
 
-  let start_mirror { Part.tar; swap; git_dump; md5s; sha512s } stack git_ctx http_ctx =
+  let start_mirror { Part.tar; swap; index; git_dump; md5s; sha512s } stack git_ctx http_ctx =
     KV.connect tar >>= fun kv ->
     Cache.connect git_dump >>= fun git_dump ->
     Cache.connect md5s >>= fun md5s ->
     Cache.connect sha512s >>= fun sha512s ->
+    Cache.connect index >>= fun index ->
     Swap.connect swap >>= fun swap ->
     Logs.info (fun m -> m "Available bytes in tar storage: %Ld" (KV.free kv));
     let disk = Disk.empty kv md5s sha512s swap in
@@ -1076,65 +1122,104 @@ stamp: %S
       Disk.check ~skip_verify_sha256:(K.skip_verify_sha256 ()) disk
     else
       begin
-        Logs.info (fun m -> m "Initializing git state. This may take a while...");
-        (if K.ignore_local_git () then
-           Lwt.return (Error ())
-         else
-           restore_git ~remote git_dump git_ctx) >>= function
-        | Ok git_kv -> Lwt.return (false, git_kv)
-        | Error () ->
-          Git_kv.connect git_ctx remote >>= fun git_kv ->
-          Lwt.return (true, git_kv)
-      end >>= fun (need_dump, git_kv) ->
-      Logs.info (fun m -> m "Done initializing git state!");
-      Serve.commit_id git_kv >>= fun commit_id ->
-      Logs.info (fun m -> m "git: %s" commit_id);
-      Serve.create remote git_kv >>= fun (serve, urls) ->
-      Paf.init ~port:(K.port ()) (Stack.tcp stack) >>= fun t ->
-      let update () =
-        if Disk.completely_checked disk then
-          Serve.update_git ~remote serve git_kv >>= function
-          | None | Some ([], _) -> Lwt.return_unit
-          | Some (_changes, urls) ->
-            dump_git git_dump git_kv >>= fun () ->
-            download_archives (K.parallel_downloads ()) disk http_ctx urls
-        else begin
-          Logs.warn (fun m -> m "disk is not ready yet, thus not updating");
-          Lwt.return_unit
-        end
-      in
-      let service =
-        Paf.http_service
-          ~error_handler:(fun _ ?request:_ _ _ -> ())
-          (Serve.dispatch serve disk (K.hook_url ()) update)
-      in
-      let `Initialized th = Paf.serve service t in
-      Logs.info (fun f -> f "listening on %d/HTTP" (K.port ()));
-      Lwt.join [
-        (if need_dump then begin
-            Logs.info (fun m -> m "dumping git state %s" commit_id);
-            dump_git git_dump git_kv
-         end else
-           Lwt.return_unit) ;
-        (Disk.check ~skip_verify_sha256:(K.skip_verify_sha256 ()) disk)
+        Paf.init ~port:(K.port ()) (Stack.tcp stack) >>= fun t ->
+        Logs.info (fun m -> m "Restoring index.");
+        let git_kv = ref None in
+        let init_git_kv () =
+          Logs.info (fun m -> m "Initializing git state. This may take a while");
+          ((if K.ignore_local_git () then
+              Lwt.return (Error ())
+            else
+              restore_git ~remote git_dump git_ctx) >>= function
+           | Ok git -> Lwt.return (false, git)
+           | Error () ->
+             Git_kv.connect git_ctx remote >>= fun git ->
+             Lwt.return (true, git)) >>= fun (need_dump, git) ->
+          Logs.info (fun m -> m "Done initializing git state!");
+          git_kv := Some git;
+          Lwt.return (need_dump, git)
+        in
+        let update serve () =
+          match !git_kv with
+          | None ->
+            Logs.warn (fun m -> m "git kv is not ready yet, thus not updating");
+            Lwt.return_unit
+          | Some git_kv ->
+            if Disk.completely_checked disk then
+              Serve.update_git ~remote serve git_kv >>= function
+              | None | Some ([], _) -> Lwt.return_unit
+              | Some (_changes, urls) ->
+                Serve.dump_index index serve >>= fun () ->
+                dump_git git_dump git_kv >>= fun () ->
+                download_archives (K.parallel_downloads ()) disk http_ctx urls
+            else begin
+              Logs.warn (fun m -> m "disk is not ready yet, thus not updating");
+              Lwt.return_unit
+            end
+        in
+        (Serve.restore_index index >>= function
+          | Ok serve ->
+            let service =
+              Paf.http_service
+                ~error_handler:(fun _ ?request:_ _ _ -> ())
+                (Serve.dispatch serve disk (K.hook_url ()) (update serve))
+            in
+            let `Initialized th = Paf.serve service t in
+            Logs.info (fun f -> f "listening on %d/HTTP" (K.port ()));
+            Lwt.return (serve, true, th, false, SM.empty)
+          | Error () ->
+            init_git_kv () >>= fun (need_dump, git) ->
+            Serve.commit_id git >>= fun commit_id ->
+            Logs.info (fun m -> m "git: %s" commit_id);
+            Serve.create remote git >>= fun (serve, urls) ->
+            let service =
+              Paf.http_service
+                ~error_handler:(fun _ ?request:_ _ _ -> ())
+                (Serve.dispatch serve disk (K.hook_url ()) (update serve))
+            in
+            let `Initialized th = Paf.serve service t in
+            Logs.info (fun f -> f "listening on %d/HTTP" (K.port ()));
+            Lwt.return (serve, false, th, need_dump, urls)) >>= fun (serve, need_git_update, th, need_dump, urls) ->
+        Lwt.join [
+          (if need_git_update then
+             init_git_kv () >>= fun (need_dump, git) ->
+             Serve.commit_id git >>= fun commit_id ->
+             Logs.info (fun m -> m "dumping git state %s" commit_id);
+             Serve.dump_index index serve >>= fun () ->
+             dump_git git_dump git
+           else if need_dump then
+             match !git_kv with
+             | None ->
+               Logs.err (fun m -> m "git_kv not yet set");
+               Lwt.return_unit
+             | Some git ->
+               Serve.commit_id git >>= fun commit_id ->
+               Logs.info (fun m -> m "dumping git state %s" commit_id);
+               Serve.dump_index index serve >>= fun () ->
+               dump_git git_dump git
+           else
+             Lwt.return_unit) ;
+          (Disk.check ~skip_verify_sha256:(K.skip_verify_sha256 ()) disk)
       ] >>= fun () ->
-      Lwt.async (fun () ->
-          let rec go () =
-            Time.sleep_ns (Duration.of_hour 1) >>= fun () ->
-            update () >>= fun () ->
-            go ()
-          in
-          go ());
-      download_archives (K.parallel_downloads ()) disk http_ctx urls >>= fun () ->
-      (th >|= fun _v -> ())
+        Lwt.async (fun () ->
+            let rec go () =
+              update serve () >>= fun () ->
+              Time.sleep_ns (Duration.of_hour 1) >>= fun () ->
+              go ()
+            in
+            go ());
+        download_archives (K.parallel_downloads ()) disk http_ctx urls >>= fun () ->
+        (th >|= fun _v -> ())
+      end
 
   let start block _time _pclock stack git_ctx http_ctx =
     let initialize_disk = K.initialize_disk ()
     and cache_size = K.cache_size ()
     and git_size = K.git_size ()
-    and swap_size = K.swap_size () in
+    and swap_size = K.swap_size ()
+    and index_size = K.index_size () in
     if initialize_disk then
-      Part.format block ~cache_size ~git_size ~swap_size >>= function
+      Part.format block ~cache_size ~git_size ~swap_size ~index_size >>= function
       | Ok () ->
         Logs.app (fun m -> m "Successfully initialized the disk! You may restart now without --initialize-disk.");
         Lwt.return_unit
