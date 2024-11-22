@@ -723,27 +723,18 @@ stamp: %S
       mutable index : string ;
     }
 
-    let to_string { commit_id ; modified ; repo ; index } =
-      String.concat ";" [ commit_id ; modified ; repo ; index ]
+    let marshal t =
+      let version = char_of_int 1 in
+      String.make 1 version ^ Marshal.to_string t []
 
-    let of_string str =
-      match String.index_opt str ';' with
-      | None -> Error (`Msg "no separator found")
-      | Some commit_end ->
-        match String.index_from_opt str (succ commit_end) ';' with
-        | None -> Error (`Msg "no separator found")
-        | Some modified_end ->
-          match String.index_from_opt str (succ modified_end) ';' with
-          | None -> Error (`Msg "no separator found")
-          | Some repo_end ->
-            let last_chunk = String.length str - succ repo_end in
-            Ok { commit_id = String.sub str 0 commit_end ;
-                 modified = String.sub str (succ commit_end) modified_end ;
-                 repo = String.sub str (succ modified_end) repo_end ;
-                 index = String.sub str (succ repo_end) last_chunk }
+    let unmarshal s =
+      let version = int_of_char s.[0] in
+      match version with
+      | 1 -> Ok (Marshal.from_string s 1)
+      | _ -> Error ("Unsupported version " ^ string_of_int version)
 
     let dump_index index_dump t =
-      let data = to_string t in
+      let data = marshal t in
       Cache.write index_dump data >|= function
       | Ok () ->
         Logs.info (fun m -> m "dumped index %d bytes" (String.length data))
@@ -757,8 +748,8 @@ stamp: %S
         Logs.warn (fun m -> m "failed to read index state: %a" Cache.pp_error e);
         Error ()
       | Ok Some data ->
-        match of_string data with
-        | Error `Msg msg ->
+        match unmarshal data with
+        | Error msg ->
           Logs.warn (fun m -> m "failed to decode index: %s" msg);
           Error ()
         | Ok t -> Ok t
