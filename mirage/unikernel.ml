@@ -640,22 +640,32 @@ module Make
     let entries_of_git ~mtime store repo urls =
       let entries = Git.contents store in
       let to_entry path =
-        Store.get store path >|= function
-        | Ok data ->
-          let data =
-            if Mirage_kv.Key.(equal path (v "repo"))
-            then repo else data
-          in
-          let file_mode = 0o644
-          and mod_time = Int64.of_int mtime
-          and user_id = 0
-          and group_id = 0
-          and size = String.length data in
-          let hdr = Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
-              (Mirage_kv.Key.to_string path) (Int64.of_int size) in
-          urls := Git.find_urls !urls path data;
-          Some (Some Tar.Header.Ustar, hdr, once data)
-        | Error _ -> None in
+        match Mirage_kv.Key.segments path with
+        (* from opam source code, src/repository/opamHTTP.ml:
+           include only three top-level dirs/files: packages, version, repo *)
+        | "packages" :: _
+        | "version" :: _
+        | "repo" :: _ ->
+          begin
+            Store.get store path >|= function
+            | Ok data ->
+              let data =
+                if Mirage_kv.Key.(equal path (v "repo"))
+                then repo else data
+              in
+              let file_mode = 0o644
+              and mod_time = Int64.of_int mtime
+              and user_id = 0
+              and group_id = 0
+              and size = String.length data in
+              let hdr = Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
+                  (Mirage_kv.Key.to_string path) (Int64.of_int size) in
+              urls := Git.find_urls !urls path data;
+              Some (Some Tar.Header.Ustar, hdr, once data)
+            | Error _ -> None
+          end
+        | _ -> Lwt.return None
+      in
       let entries = Lwt_stream.filter_map_s to_entry entries in
       Lwt.return begin fun () -> Tar.High (High.inj (Lwt_stream.get entries >|= Result.ok)) end
 
