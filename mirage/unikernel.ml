@@ -697,11 +697,15 @@ module Make
     Printf.sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT" weekday d m' y hh mm ss
 
     let commit_id git_kv =
-      Store.digest git_kv Mirage_kv.Key.empty >|= fun r ->
-      Result.fold r ~ok:Ohex.encode
-        ~error:(fun e ->
-            Logs.err (fun m -> m "%a" Store.pp_error e);
-            exit 2)
+      match Git_kv.commit git_kv with
+      | Some `Clean hash ->
+        Ohex.encode (Digestif.SHA1.to_raw_string hash)
+      | Some `Dirty _ ->
+        Logs.err (fun m -> m "commit is dirty");
+        exit 2
+      | None ->
+        Logs.err (fun m -> m "commit is none");
+        exit 2
 
     let repo remote commit =
       let upstream = List.hd (String.split_on_char '#' remote) in

@@ -8,7 +8,7 @@ let mirror =
       package "h2" ;
       package "ohex" ;
       package "httpaf" ;
-      package ~min:"0.0.5" "git-kv" ;
+      package ~min:"0.1.1" "git-kv" ;
       package ~min:"3.10.0" "git-paf" ;
       package "opam-file-format" ;
       package ~min:"3.0.0" ~sublibs:[ "gz" ] "tar" ;
