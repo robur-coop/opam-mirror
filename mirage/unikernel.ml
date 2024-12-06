@@ -733,7 +733,7 @@ stamp: %S
     }
 
     let create remote git_kv =
-      commit_id git_kv >>= fun commit_id ->
+      let commit_id = commit_id git_kv in
       modified git_kv >>= fun modified ->
       let repo = repo remote commit_id in
       Tarball.of_git repo git_kv >|= fun (index, urls) ->
