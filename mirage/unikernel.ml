@@ -756,7 +756,7 @@ stamp: %S
             Lwt.return (Some ([], SM.empty))
           | Ok changes ->
             last_git_status := Ok (List.length changes);
-            commit_id git_kv >>= fun commit_id ->
+            let commit_id = commit_id git_kv in
             modified git_kv >>= fun modified ->
             Logs.info (fun m -> m "git: %s" commit_id);
             let repo = repo remote commit_id in
@@ -1101,7 +1101,7 @@ stamp: %S
           Lwt.return (true, git_kv)
       end >>= fun (need_dump, git_kv) ->
       Logs.info (fun m -> m "Done initializing git state!");
-      Serve.commit_id git_kv >>= fun commit_id ->
+      let commit_id = Serve.commit_id git_kv in
       Logs.info (fun m -> m "git: %s" commit_id);
       Serve.create remote git_kv >>= fun (serve, urls) ->
       Paf.init ~port:(K.port ()) (Stack.tcp stack) >>= fun t ->
