@@ -1,7 +1,5 @@
 open Lwt.Infix
 
-let argument_error = 64
-
 module K = struct
   open Cmdliner
 
@@ -87,17 +85,14 @@ end
 
 module Make
   (BLOCK : Mirage_block.S)
-  (Time : Mirage_time.S)
-  (Pclock : Mirage_clock.PCLOCK)
   (Stack : Tcpip.Stack.V4V6)
   (_ : sig end)
   (HTTP : Http_mirage_client.S) = struct
 
   module Part = Partitions.Make(BLOCK)
-  module KV = Tar_mirage.Make_KV_RW(Pclock)(Part)
+  module KV = Tar_mirage.Make_KV_RW(Part)
   module Cache = OneFFS.Make(Part)
   module Swap = Swapfs.Make(Part)
-  module Store = Git_kv.Make(Pclock)
 
   module SM = Map.Make(String)
   module SSet = Set.Make(String)
@@ -133,12 +128,12 @@ module Make
           | [] -> Lwt.return None
           | step :: tl ->
             explore := tl;
-            Store.exists store step >>= function
+            Git_kv.exists store step >>= function
             | Error e -> go ()
             | Ok None -> go ()
             | Ok Some `Value -> Lwt.return (Some step)
             | Ok Some `Dictionary ->
-              Store.list store step >>= function
+              Git_kv.list store step >>= function
               | Error e -> go ()
               | Ok steps ->
                 explore := List.map fst steps @ !explore;
@@ -458,10 +453,10 @@ module Make
           t.md5s <- SM.add md5 sha256 t.md5s;
           t.sha512s <- SM.add sha512 sha256 t.sha512s;
           add_checked t dest
-        | Error `Write_error e -> add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Write_error e)
-        | Error `Swap e -> add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Swap e)
+        | Error `Write_error e -> add_failed url (Mirage_ptime.now ()) (`Write_error e)
+        | Error `Swap e -> add_failed url (Mirage_ptime.now ()) (`Swap e)
       else begin
-        add_failed url (Ptime.v (Pclock.now_d_ps ()))
+        add_failed url (Mirage_ptime.now ())
           (`Bad_checksum (hash, Archive_checksum.get digests hash, csum));
         Lwt.return_unit
       end
@@ -647,7 +642,7 @@ module Make
         | "version" :: _
         | "repo" :: _ ->
           begin
-            Store.get store path >|= function
+            Git_kv.get store path >|= function
             | Ok data ->
               let data =
                 if Mirage_kv.Key.(equal path (v "repo"))
@@ -670,7 +665,7 @@ module Make
       Lwt.return begin fun () -> Tar.High (High.inj (Lwt_stream.get entries >|= Result.ok)) end
 
     let of_git repo store =
-      let now = Ptime.v (Pclock.now_d_ps ()) in
+      let now = Mirage_ptime.now () in
       let mtime = Option.value ~default:0 Ptime.(Span.to_int_s (to_span now)) in
       let urls = ref SM.empty in
       entries_of_git ~mtime store repo urls >>= fun entries ->
@@ -717,11 +712,11 @@ stamp: %S
 |} upstream commit commit
 
     let modified git_kv =
-      Store.last_modified git_kv Mirage_kv.Key.empty >|= fun r ->
+      Git_kv.last_modified git_kv Mirage_kv.Key.empty >|= fun r ->
       let v =
         Result.fold r
           ~ok:Fun.id
-          ~error:(fun _ -> Ptime.v (Pclock.now_d_ps ()))
+          ~error:(fun _ -> Mirage_ptime.now ())
       in
       ptime_to_http_date v
 
@@ -744,7 +739,7 @@ stamp: %S
     let update_git ~remote t git_kv =
       Lwt_mutex.with_lock update_lock (fun () ->
           Logs.info (fun m -> m "pulling the git repository");
-          last_git := Ptime.v (Pclock.now_d_ps ());
+          last_git := Mirage_ptime.now ();
           Git_kv.pull git_kv >>= function
           | Error `Msg msg ->
             Logs.err (fun m -> m "error %s while updating git" msg);
@@ -840,26 +835,26 @@ stamp: %S
         ^ "</div></body></html>"
 
     let not_modified request (modified, etag) =
-      match Httpaf.Headers.get request.Httpaf.Request.headers "if-modified-since" with
+      match H1.Headers.get request.H1.Request.headers "if-modified-since" with
       | Some ts -> String.equal ts modified
-      | None -> match Httpaf.Headers.get request.Httpaf.Request.headers "if-none-match" with
+      | None -> match H1.Headers.get request.H1.Request.headers "if-none-match" with
         | Some etags -> List.mem etag (String.split_on_char ',' etags)
         | None -> false
 
     let not_found reqd path =
       let data = "Resource not found " ^ path in
-      let headers = Httpaf.Headers.of_list
+      let headers = H1.Headers.of_list
           [ "content-length", string_of_int (String.length data) ] in
-      let resp = Httpaf.Response.create ~headers `Not_found in
-      Httpaf.Reqd.respond_with_string reqd resp data
+      let resp = H1.Response.create ~headers `Not_found in
+      H1.Reqd.respond_with_string reqd resp data
 
     let respond_with_empty reqd resp =
       let hdr =
-        Httpaf.Headers.add_unless_exists resp.Httpaf.Response.headers
+        H1.Headers.add_unless_exists resp.H1.Response.headers
           "connection" "close"
       in
-      let resp = { resp with Httpaf.Response.headers = hdr } in
-      Httpaf.Reqd.respond_with_string reqd resp ""
+      let resp = { resp with H1.Response.headers = hdr } in
+      H1.Reqd.respond_with_string reqd resp ""
 
     (* From the OPAM manual, all we need:
        /repo -- repository configuration file
@@ -871,12 +866,12 @@ stamp: %S
 
     (* for repo and index.tar.gz:
         if Last_modified.not_modified request then
-          let resp = Httpaf.Response.create `Not_modified in
+          let resp = H1.Response.create `Not_modified in
           respond_with_empty reqd resp
         else *)
     let dispatch t store hook_url update _flow _conn reqd =
-      let request = Httpaf.Reqd.request reqd in
-      match String.split_on_char '/' request.Httpaf.Request.target with
+      let request = H1.Reqd.request reqd in
+      match String.split_on_char '/' request.H1.Request.target with
       | [ ""; x ] when String.equal x hook_url ->
         Lwt.async update;
         let data = "Update in progress" in
@@ -887,9 +882,9 @@ stamp: %S
           "last-modified", t.modified ;
           "content-length", string_of_int (String.length data) ;
         ] in
-        let headers = Httpaf.Headers.of_list headers in
-        let resp = Httpaf.Response.create ~headers `OK in
-        Httpaf.Reqd.respond_with_string reqd resp data
+        let headers = H1.Headers.of_list headers in
+        let resp = H1.Response.create ~headers `OK in
+        H1.Reqd.respond_with_string reqd resp data
       | [ ""; x ] when String.equal x "status" ->
         let data = status t store in
         let mime_type = "text/html" in
@@ -897,12 +892,12 @@ stamp: %S
           "content-type", mime_type ;
           "content-length", string_of_int (String.length data) ;
         ] in
-        let headers = Httpaf.Headers.of_list headers in
-        let resp = Httpaf.Response.create ~headers `OK in
-        Httpaf.Reqd.respond_with_string reqd resp data
+        let headers = H1.Headers.of_list headers in
+        let resp = H1.Response.create ~headers `OK in
+        H1.Reqd.respond_with_string reqd resp data
       | [ ""; "repo" ] ->
         if not_modified request (t.modified, t.commit_id) then
-          let resp = Httpaf.Response.create `Not_modified in
+          let resp = H1.Response.create `Not_modified in
           respond_with_empty reqd resp
         else
           let data = t.repo in
@@ -913,13 +908,13 @@ stamp: %S
             "last-modified", t.modified ;
             "content-length", string_of_int (String.length data) ;
           ] in
-          let headers = Httpaf.Headers.of_list headers in
-          let resp = Httpaf.Response.create ~headers `OK in
-          Httpaf.Reqd.respond_with_string reqd resp data
+          let headers = H1.Headers.of_list headers in
+          let resp = H1.Response.create ~headers `OK in
+          H1.Reqd.respond_with_string reqd resp data
       | [ ""; "index.tar.gz" ] ->
         (* deliver prepared tarball *)
         if not_modified request (t.modified, t.commit_id) then
-          let resp = Httpaf.Response.create `Not_modified in
+          let resp = H1.Response.create `Not_modified in
           respond_with_empty reqd resp
         else
           let data = t.index in
@@ -930,15 +925,15 @@ stamp: %S
             "last-modified", t.modified ;
             "content-length", string_of_int (String.length data) ;
           ] in
-          let headers = Httpaf.Headers.of_list headers in
-          let resp = Httpaf.Response.create ~headers `OK in
-          Httpaf.Reqd.respond_with_string reqd resp data
+          let headers = H1.Headers.of_list headers in
+          let resp = H1.Response.create ~headers `OK in
+          H1.Reqd.respond_with_string reqd resp data
       | "" :: "cache" :: hash_algo :: _ :: hash :: [] ->
         (* `<hash-algo>/<first-2-hash-characters>/<hash>` *)
         begin
           match hash_of_string hash_algo with
           | Error `Msg msg ->
-            not_found reqd request.Httpaf.Request.target
+            not_found reqd request.H1.Request.target
           | Ok h ->
             let hash = Mirage_kv.Key.v hash in
             Lwt.async (fun () ->
@@ -947,13 +942,13 @@ stamp: %S
                     | Error _ -> t.modified
                     | Ok v -> ptime_to_http_date v) >>= fun last_modified ->
                   if not_modified request (last_modified, Mirage_kv.Key.basename hash) then
-                    let resp = Httpaf.Response.create `Not_modified in
+                    let resp = H1.Response.create `Not_modified in
                     respond_with_empty reqd resp;
                     Lwt.return_unit
                   else
                     Disk.size store h hash >>= function
                     | Error _ ->
-                      not_found reqd request.Httpaf.Request.target;
+                      not_found reqd request.H1.Request.target;
                       Lwt.return_unit
                     | Ok size ->
                       let size = Optint.Int63.to_string size in
@@ -965,24 +960,24 @@ stamp: %S
                         "content-length", size ;
                       ]
                       in
-                      let headers = Httpaf.Headers.of_list headers in
-                      let resp = Httpaf.Response.create ~headers `OK in
-                      let body = Httpaf.Reqd.respond_with_streaming reqd resp in
+                      let headers = H1.Headers.of_list headers in
+                      let resp = H1.Response.create ~headers `OK in
+                      let body = H1.Reqd.respond_with_streaming reqd resp in
                       Disk.read_chunked store h hash (fun () chunk ->
                           let wait, wakeup = Lwt.task () in
                           (* FIXME: catch exception when body is closed *)
-                          Httpaf.Body.write_string body chunk;
-                          Httpaf.Body.flush body (Lwt.wakeup wakeup);
+                          H1.Body.Writer.write_string body chunk;
+                          H1.Body.Writer.flush body (Lwt.wakeup wakeup);
                           wait) () >|= fun _ ->
-                      Httpaf.Body.close_writer body
+                      H1.Body.Writer.close body
                 else begin
-                  not_found reqd request.Httpaf.Request.target;
+                  not_found reqd request.H1.Request.target;
                   Lwt.return_unit
                 end)
         end
       | _ ->
-        Logs.warn (fun m -> m "unknown request %s" request.Httpaf.Request.target);
-        not_found reqd request.Httpaf.Request.target
+        Logs.warn (fun m -> m "unknown request %s" request.H1.Request.target);
+        not_found reqd request.H1.Request.target
 
   end
 
@@ -1021,27 +1016,27 @@ stamp: %S
                 download elt mirrors upstream_caches
             in
             let quux, body_init = Disk.init_write disk csums in
-            add_to_active url (Ptime.v (Pclock.now_d_ps ()));
+            add_to_active url (Mirage_ptime.now ());
             if not (K.skip_download ()) then
               Http_mirage_client.request http_client url (Disk.write_partial disk quux url) body_init >>= function
               | Ok (resp, r) ->
                 begin match r with
                   | Error `Bad_response ->
-                    add_failed url (Ptime.v (Pclock.now_d_ps ()))
+                    add_failed url (Mirage_ptime.now ())
                       (`Bad_response (resp.status, resp.reason));
                     retry ()
                   | Error `Write_error e ->
-                    add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Write_error e);
+                    add_failed url (Mirage_ptime.now ()) (`Write_error e);
                     retry ()
                   | Error `Swap e ->
-                    add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Swap e);
+                    add_failed url (Mirage_ptime.now ()) (`Swap e);
                     retry ()
                   | Ok (digests, body) ->
                     decr remaining_downloads;
                     Disk.finalize_write disk quux ~url body csums digests
                 end
               | Error me ->
-                add_failed url (Ptime.v (Pclock.now_d_ps ())) (`Mimic me);
+                add_failed url (Mirage_ptime.now ()) (`Mimic me);
                 retry ()
             else
               retry ()
@@ -1134,7 +1129,7 @@ stamp: %S
       ] >>= fun () ->
       Lwt.async (fun () ->
           let rec go () =
-            Time.sleep_ns (Duration.of_hour 1) >>= fun () ->
+            Mirage_sleep.ns (Duration.of_hour 1) >>= fun () ->
             update () >>= fun () ->
             go ()
           in
@@ -1142,7 +1137,7 @@ stamp: %S
       download_archives (K.parallel_downloads ()) disk http_ctx urls >>= fun () ->
       (th >|= fun _v -> ())
 
-  let start block _time _pclock stack git_ctx http_ctx =
+  let start block stack git_ctx http_ctx =
     let initialize_disk = K.initialize_disk ()
     and cache_size = K.cache_size ()
     and git_size = K.git_size ()
