@@ -1,4 +1,4 @@
-(* mirage >= 4.8.0 & < 4.9.0 *)
+(* mirage >= 4.9.0 & < 4.10.0 *)
 open Mirage
 
 let mirror =
@@ -21,7 +21,7 @@ let mirror =
       package "digestif" ;
       package "swapfs" ;
     ]
-    (block @-> time @-> pclock @-> stackv4v6 @-> git_client @-> alpn_client @-> job)
+    (block @-> stackv4v6 @-> git_client @-> alpn_client @-> job)
 
 let stack = generic_stackv4v6 default_network
 let he = generic_happy_eyeballs stack
@@ -37,4 +37,4 @@ let git_client, alpn_client =
   paf_client tcp (mimic_happy_eyeballs stack he dns)
 
 let () = register "mirror"
-  [ mirror $ block $ default_time $ default_posix_clock $ stack $ git_client $ alpn_client ]
+  [ mirror $ block $ stack $ git_client $ alpn_client ]
