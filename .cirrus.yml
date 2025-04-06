@@ -8,5 +8,5 @@ freebsd_task:
   configure_script: eval `opam env` && mirage configure -t hvt -f mirage/config.ml
   depend_script: eval `opam env` && gmake depend
   build_script: eval `opam env` && gmake build
-  unipi_artifacts:
-    path: mirage/dist/unipi.hvt
+  opam_mirror_artifacts:
+    path: mirage/mirage/dist/mirror.hvt
