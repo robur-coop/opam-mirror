@@ -9,4 +9,4 @@ freebsd_task:
   depend_script: eval `opam env` && gmake depend
   build_script: eval `opam env` && gmake build
   opam_mirror_artifacts:
-    path: mirage/mirage/dist/mirror.hvt
+    path: mirage/dist/mirror.hvt
