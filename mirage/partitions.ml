@@ -8,6 +8,7 @@ module Make(BLOCK : Mirage_block.S) = struct
   type partitions = {
     tar : Part.t ;
     swap : Part.t ;
+    index : Part.t ;
     git_dump : Part.t ;
     md5s : Part.t ;
     sha512s : Part.t ;
@@ -18,6 +19,7 @@ module Make(BLOCK : Mirage_block.S) = struct
   let tar_guid = Uuidm.of_string "53cd6812-46cc-474e-a141-30b3aed85f53" |> Option.get
   let cache_guid = Uuidm.of_string "22ab9cf5-6e51-45c2-998a-862e23aab264" |> Option.get
   let git_guid = Uuidm.of_string "30faa50a-4c9d-47ff-a1a5-ecfb3401c027" |> Option.get
+  let index_guid = Uuidm.of_string "1cf8c2dc-a7fd-11ef-a2a6-68f728e7bbbc" |> Option.get
 
   (* GPT uses a 72 byte utf16be encoded string for partition names *)
   let utf16be_of_ascii s =
@@ -56,37 +58,41 @@ module Make(BLOCK : Mirage_block.S) = struct
   let connect block =
     let* info = BLOCK.get_info block in
     let* gpt = read_partition_table info block in
-    let tar, swap, git_dump, md5s, sha512s =
+    let tar, swap, index, git_dump, md5s, sha512s =
       match
         List.fold_left
-          (fun (tar, swap, git_dump, md5s, sha512s) p ->
+          (fun (tar, swap, index, git_dump, md5s, sha512s) p ->
              if String.equal p.Gpt.Partition.name
                  (utf16be_of_ascii "tar")
              then
-               (Some p, swap, git_dump, md5s, sha512s)
+               (Some p, swap, index, git_dump, md5s, sha512s)
              else if String.equal p.name
                  (utf16be_of_ascii "git_dump")
              then
-               (tar, swap, Some p, md5s, sha512s)
+               (tar, swap, index, Some p, md5s, sha512s)
              else if String.equal p.name
                  (utf16be_of_ascii "md5s")
              then
-               (tar, swap, git_dump, Some p, sha512s)
+               (tar, swap, index, git_dump, Some p, sha512s)
              else if String.equal p.name
                  (utf16be_of_ascii "sha512s")
              then
-               (tar, swap, git_dump, md5s, Some p)
+               (tar, swap, index, git_dump, md5s, Some p)
              else if String.equal p.name
                  (utf16be_of_ascii "swap")
              then
-               (tar, Some p, git_dump, md5s, sha512s)
+               (tar, Some p, index, git_dump, md5s, sha512s)
+             else if String.equal p.name
+                 (utf16be_of_ascii "index")
+             then
+               (tar, swap, Some p, git_dump, md5s, sha512s)
              else
                Format.kasprintf failwith "Unknown partition %S" p.name)
-          (None, None, None, None, None)
+          (None, None, None, None, None, None)
           gpt.partitions
       with
-      | (Some tar, Some swap, Some git_dump, Some md5s, Some sha512s) ->
-        (tar, swap, git_dump, md5s, sha512s)
+      | (Some tar, Some swap, Some index, Some git_dump, Some md5s, Some sha512s) ->
+        (tar, swap, index, git_dump, md5s, sha512s)
       | _ ->
         failwith "not all partitions found :("
     in
@@ -97,11 +103,12 @@ module Make(BLOCK : Mirage_block.S) = struct
       let (part, _after) = Part.subpartition len after in
       part
     in
-    let tar = get_part tar and swap = get_part swap and git_dump = get_part git_dump
+    let tar = get_part tar and swap = get_part swap and index = get_part index
+    and git_dump = get_part git_dump
     and md5s = get_part md5s and sha512s = get_part sha512s in
-    { tar ; swap; git_dump ; md5s ; sha512s }
+    { tar ; swap; index ; git_dump ; md5s ; sha512s }
 
-  let format block ~cache_size ~git_size ~swap_size =
+  let format block ~cache_size ~git_size ~swap_size ~index_size =
     let* { size_sectors; sector_size; _ } = BLOCK.get_info block in
     let ( let*? ) = Lwt_result.bind in
     (* ocaml-gpt uses a fixed size partition entries table. Create an empty GPT
@@ -119,13 +126,14 @@ module Make(BLOCK : Mirage_block.S) = struct
     let sectors_cache = mb_in_sectors cache_size
     and sectors_git = mb_in_sectors git_size
     and sectors_swap = mb_in_sectors swap_size
+    and sectors_index = mb_in_sectors index_size
     in
     let*? () =
       if size_sectors <
          (* protective MBR + GPT header + GPT table *)
          let ( + ) = Int64.add in
          empty.first_usable_lba +
-         min 1L (Int64.of_int (2 * Tar.Header.length / sector_size)) + sectors_cache + sectors_cache + sectors_git
+         min 1L (Int64.of_int (2 * Tar.Header.length / sector_size)) + sectors_cache + sectors_cache + sectors_git + sectors_index
          + 1L (* backup GPT header *) then
         Lwt.return_error (`Msg "too small disk")
       else Lwt_result.return ()
@@ -160,13 +168,22 @@ module Make(BLOCK : Mirage_block.S) = struct
         (Int64.pred md5s.starting_lba)
       |> Result.get_ok
     in
+    let index =
+      Gpt.Partition.make
+        ~name:(utf16be_of_ascii "index")
+        ~type_guid:index_guid
+        ~attributes
+        (Int64.sub git_dump.starting_lba sectors_index)
+        (Int64.pred git_dump.starting_lba)
+      |> Result.get_ok
+    in
     let swap =
       Gpt.Partition.make
         ~name:(utf16be_of_ascii "swap")
         ~type_guid:swap_guid
         ~attributes
-        (Int64.sub git_dump.starting_lba sectors_swap)
-        (Int64.pred git_dump.starting_lba)
+        (Int64.sub index.starting_lba sectors_swap)
+        (Int64.pred index.starting_lba)
       |> Result.get_ok
     in
     let tar =
@@ -180,7 +197,7 @@ module Make(BLOCK : Mirage_block.S) = struct
     in
     let gpt =
       let partitions =
-        [ tar; swap; git_dump; md5s; sha512s ]
+        [ tar; swap; index; git_dump; md5s; sha512s ]
       in
       Gpt.make ~sector_size ~disk_sectors:size_sectors partitions
       |> Result.get_ok
