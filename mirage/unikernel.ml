@@ -1123,7 +1123,6 @@ stamp: %S
     else
       begin
         Paf.init ~port:(K.port ()) (Stack.tcp stack) >>= fun t ->
-        Logs.info (fun m -> m "Restoring index.");
         let git_kv = ref None in
         let init_git_kv () =
           Logs.info (fun m -> m "Initializing git state. This may take a while...");
@@ -1159,6 +1158,7 @@ stamp: %S
               Lwt.return_unit
             end
         in
+        Logs.info (fun m -> m "Restoring index.");
         (Serve.restore_index index >>= function
           | Ok serve ->
             let service =

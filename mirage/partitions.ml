@@ -208,7 +208,7 @@ module Make(BLOCK : Mirage_block.S) = struct
     Gptar.marshal_header ~sector_size buf gpt;
     Gpt.marshal_partition_table ~sector_size
       (Cstruct.shift buf (sector_size * Int64.to_int gpt.partition_entry_lba))
-    gpt;
+      gpt;
     let write block sector_start buffers =
       BLOCK.write block sector_start buffers
       |> Lwt_result.map_error (fun e -> `Block e)
@@ -235,5 +235,8 @@ module Make(BLOCK : Mirage_block.S) = struct
     let*? () =
       write block md5s.starting_lba [ zero_sector ]
     in
-    write block sha512s.starting_lba [ zero_sector ]
+    let*? () =
+      write block sha512s.starting_lba [ zero_sector ]
+    in
+    write block index.starting_lba [ zero_sector ]
 end
