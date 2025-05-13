@@ -1133,6 +1133,8 @@ stamp: %S
            | Ok git -> Lwt.return (false, git)
            | Error () ->
              Git_kv.connect git_ctx remote >>= fun git ->
+             last_git := Mirage_ptime.now ();
+             last_git_status := Ok 0; (* TODO should be the number of files *)
              Lwt.return (true, git))
           >>= fun (need_dump, git) ->
           let commit_id = Serve.commit_id git in
