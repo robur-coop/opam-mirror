@@ -1,4 +1,4 @@
-(* mirage >= 4.9.0 & < 4.10.0 *)
+(* mirage >= 4.10.0 & < 4.11.0 *)
 open Mirage
 
 let mirror =
@@ -8,8 +8,7 @@ let mirror =
       package "h2" ;
       package "ohex" ;
       package "httpaf" ;
-      package ~min:"0.1.1" "git-kv" ;
-      package ~min:"3.10.0" "git-paf" ;
+      package ~min:"0.2.0" "git-kv" ;
       package "opam-file-format" ;
       package ~min:"3.0.0" ~sublibs:[ "gz" ] "tar" ;
       package ~min:"3.0.0" "tar-mirage" ;
