@@ -908,9 +908,22 @@ MCowBQYDK2VwAyEA|} ^ k ^ {|
       | Error (`Msg msg) -> failwith msg
   end
 
+  let ptime_to_http_date ptime =
+    let (y, m, d), ((hh, mm, ss), _) = Ptime.to_date_time ptime
+    and weekday = match Ptime.weekday ptime with
+      | `Mon -> "Mon" | `Tue -> "Tue" | `Wed -> "Wed" | `Thu -> "Thu"
+      | `Fri -> "Fri" | `Sat -> "Sat" | `Sun -> "Sun"
+    and month =
+      [| "Jan" ; "Feb" ; "Mar" ; "Apr" ; "May" ; "Jun" ;
+         "Jul" ; "Aug" ; "Sep" ; "Oct" ; "Nov" ; "Dec" |]
+    in
+    let m' = Array.get month (pred m) in
+    Printf.sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT" weekday d m' y hh mm ss
+
   let update_timestamp old_timestamp entries id key =
     let timestamp = Result.get_ok (Conex.sign_timestamp key id `Ed25519 old_timestamp) in
-    let mtime = Option.value ~default:0 Ptime.(Span.to_int_s (to_span (Mirage_ptime.now ()))) in
+    let now = Mirage_ptime.now () in
+    let mtime = Option.value ~default:0 Ptime.(Span.to_int_s (to_span now)) in
     let timestamp_path = [ timestamp.Conex_resource.Timestamp.name ] in
     let timestamp_data = Conex_opam_encoding.encode (Conex_resource.Timestamp.wire timestamp) in
     let timestamp_hdr =
@@ -930,25 +943,13 @@ MCowBQYDK2VwAyEA|} ^ k ^ {|
     let t =
       Tar.out ~level:Ustar (fun () -> (Tar.High (Tarball.High.inj (Lwt_stream.get entry_stream >|= Result.ok))))
     in
-      let t = Tar_gz.out_gzipped ~level:4 ~mtime:(Int32.of_int mtime) Gz.Unix t in
-      let buf = Buffer.create 1024 in
-      Tarball.to_buffer buf t >|= function
-      | Ok () -> Buffer.contents buf, timestamp
-      | Error (`Msg msg) -> failwith msg
+    let t = Tar_gz.out_gzipped ~level:4 ~mtime:(Int32.of_int mtime) Gz.Unix t in
+    let buf = Buffer.create 1024 in
+    Tarball.to_buffer buf t >|= function
+    | Ok () -> Buffer.contents buf, timestamp, ptime_to_http_date now
+    | Error (`Msg msg) -> failwith msg
 
   module Serve = struct
-    let ptime_to_http_date ptime =
-      let (y, m, d), ((hh, mm, ss), _) = Ptime.to_date_time ptime
-      and weekday = match Ptime.weekday ptime with
-        | `Mon -> "Mon" | `Tue -> "Tue" | `Wed -> "Wed" | `Thu -> "Thu"
-        | `Fri -> "Fri" | `Sat -> "Sat" | `Sun -> "Sun"
-      and month =
-        [| "Jan" ; "Feb" ; "Mar" ; "Apr" ; "May" ; "Jun" ;
-           "Jul" ; "Aug" ; "Sep" ; "Oct" ; "Nov" ; "Dec" |]
-    in
-    let m' = Array.get month (pred m) in
-    Printf.sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT" weekday d m' y hh mm ss
-
     let commit_id git_kv =
       match Git_kv.commit git_kv with
       | Some `Clean hash ->
@@ -1021,9 +1022,10 @@ MCowBQYDK2VwAyEA|} ^ k ^ {|
           Logs.warn (fun m -> m "failed to decode index: %s" msg);
           Lwt.return (Error ())
         | Ok t ->
-          update_timestamp t.timestamp t.entries (Conex.find_id_by_role root `Timestamp) (Keys.find `Timestamp keys) >>= fun (index, ts) ->
+          update_timestamp t.timestamp t.entries (Conex.find_id_by_role root `Timestamp) (Keys.find `Timestamp keys) >>= fun (index, ts, modified) ->
           t.timestamp <- ts;
           t.index <- index;
+          t.modified <- modified;
           Lwt.return (Ok t)
 
     let create root keys remote git_kv =
@@ -1154,7 +1156,7 @@ MCowBQYDK2VwAyEA|} ^ k ^ {|
       match H1.Headers.get request.H1.Request.headers "if-modified-since" with
       | Some ts -> String.equal ts modified
       | None -> match H1.Headers.get request.H1.Request.headers "if-none-match" with
-        | Some etags -> List.mem etag (String.split_on_char ',' etags)
+        | Some etags -> List.mem (Option.value ~default:"" etag) (String.split_on_char ',' etags)
         | None -> false
 
     let not_found reqd path =
@@ -1194,7 +1196,6 @@ MCowBQYDK2VwAyEA|} ^ k ^ {|
         let mime_type = "text/plain" in
         let headers = [
           "content-type", mime_type ;
-          "etag", t.commit_id ;
           "last-modified", t.modified ;
           "content-length", string_of_int (String.length data) ;
         ] in
@@ -1212,7 +1213,7 @@ MCowBQYDK2VwAyEA|} ^ k ^ {|
         let resp = H1.Response.create ~headers `OK in
         H1.Reqd.respond_with_string reqd resp data
       | [ ""; "repo" ] ->
-        if not_modified request (t.modified, t.commit_id) then
+        if not_modified request (t.modified, Some t.commit_id) then
           let resp = H1.Response.create `Not_modified in
           respond_with_empty reqd resp
         else
@@ -1229,7 +1230,8 @@ MCowBQYDK2VwAyEA|} ^ k ^ {|
           H1.Reqd.respond_with_string reqd resp data
       | [ ""; "index.tar.gz" ] ->
         (* deliver prepared tarball *)
-        if not_modified request (t.modified, t.commit_id) then
+        (* since it updates now every 5 minutes (timestamp signature), don't stick an etag *)
+        if not_modified request (t.modified, None) then
           let resp = H1.Response.create `Not_modified in
           respond_with_empty reqd resp
         else
@@ -1237,7 +1239,6 @@ MCowBQYDK2VwAyEA|} ^ k ^ {|
           let mime_type = "application/octet-stream" in
           let headers = [
             "content-type", mime_type ;
-            "etag", t.commit_id ;
             "last-modified", t.modified ;
             "content-length", string_of_int (String.length data) ;
           ] in
@@ -1257,7 +1258,7 @@ MCowBQYDK2VwAyEA|} ^ k ^ {|
                   (Disk.last_modified store h hash >|= function
                     | Error _ -> t.modified
                     | Ok v -> ptime_to_http_date v) >>= fun last_modified ->
-                  if not_modified request (last_modified, Mirage_kv.Key.basename hash) then
+                  if not_modified request (last_modified, Some (Mirage_kv.Key.basename hash)) then
                     let resp = H1.Response.create `Not_modified in
                     respond_with_empty reqd resp;
                     Lwt.return_unit
@@ -1528,6 +1529,19 @@ MCowBQYDK2VwAyEA|} ^ k ^ {|
                   go ()
                 in
                 go ());
+            Lwt.async (fun () ->
+                let rec go () =
+                  Mirage_sleep.ns (Duration.of_min 5) >>= fun () ->
+                  let ts_id = Conex.find_id_by_role root `Timestamp in
+                  let ts_key = Keys.find `Timestamp keys in
+                  update_timestamp serve.timestamp serve.entries ts_id ts_key >>= fun (index, ts, modified) ->
+                  serve.index <- index;
+                  serve.timestamp <- ts;
+                  serve.modified <- modified;
+                  go ()
+                in
+                go ());
+
             download_archives (K.parallel_downloads ()) disk http_ctx urls >>= fun () ->
             (th >|= fun _v -> ())
       end
