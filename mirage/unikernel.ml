@@ -86,10 +86,34 @@ module K = struct
     let doc = "Ignore restoring locally saved git repository." in
     let doc = Arg.info ~doc ["ignore-local-git"] in
     Mirage_runtime.register_arg Arg.(value & flag doc)
+
+  let ed_key =
+    Arg.conv ~docv:"ED25519 key (base64 encoded)"
+      ((fun s ->
+          Result.bind (Base64.decode s)
+            (fun s ->
+               (Result.map_error
+                  (fun e -> `Msg (Fmt.to_to_string Mirage_crypto_ec.pp_error e))
+                  (Mirage_crypto_ec.Ed25519.priv_of_octets s)))),
+       (fun ppf v -> Fmt.string ppf
+           (Base64.encode_string (Mirage_crypto_ec.Ed25519.priv_to_octets v))))
+
+  let target_key =
+    let doc = Arg.info ~doc:"Private key for target" ["target-key"] in
+    Mirage_runtime.register_arg Arg.(value & opt (some ed_key) None doc)
+
+  let snapshot_key =
+    let doc = Arg.info ~doc:"Private key for snapshot" ["snapshot-key"] in
+    Mirage_runtime.register_arg Arg.(value & opt (some ed_key) None doc)
+
+  let timestamp_key =
+    let doc = Arg.info ~doc:"Private key for timestamp" ["timestamp-key"] in
+    Mirage_runtime.register_arg Arg.(value & opt (some ed_key) None doc)
 end
 
 module Make
   (BLOCK : Mirage_block.S)
+  (ROOT : Mirage_block.S)
   (Stack : Tcpip.Stack.V4V6)
   (_ : sig end)
   (HTTP : Http_mirage_client.S) = struct
@@ -600,6 +624,114 @@ module Make
         | Error _ -> Error `Not_found
     end
 
+  module Keys = Map.Make (struct
+      type t = Conex_resource.Root.role
+      let compare a b = match a, b with
+        | `Timestamp, `Timestamp -> 0 | `Timestamp, _ -> -1 | _, `Timestamp -> 1
+        | `Snapshot, `Snapshot -> 0 | `Snapshot, _ -> -1 | _, `Snapshot -> 1
+        | `Maintainer, `Maintainer -> 0
+    end)
+
+  module Conex = struct
+    let ( let* ) = Result.bind
+
+    open Conex_resource
+
+    let find_id_by_role root role =
+      match Root.RM.find_opt role root.Root.roles with
+      | Some Quorum (_, keys) when Expression.KS.cardinal keys = 1 ->
+        (match Expression.KS.choose keys with
+         | Expression.Remote (id, _, _) | Local id -> id)
+      | _ -> failwith "couldn't find id by role"
+
+    let find_hash_by_role root role =
+      match Root.RM.find_opt role root.Root.roles with
+      | Some Quorum (_, keys) when Expression.KS.cardinal keys = 1 ->
+        (match Expression.KS.choose keys with
+         | Expression.Remote (_, dgst, _) -> dgst
+         | Local _ -> failwith "received local expression, expected remote")
+      | _ -> failwith "couldn't find id by role"
+
+    let pem_of_ed25519 k =
+    {|-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA|} ^ k ^ {|
+-----END PUBLIC KEY-----|}
+
+    let pub_of_priv t =
+      let open Conex_mirage_crypto.C in
+      let pub = pub_of_priv t in
+      (id t, created t, alg t, pub)
+
+    let prep root role priv =
+      let id = find_id_by_role root role
+      and hash = find_hash_by_role root role
+      in
+      let pem =
+        pem_of_ed25519 (Base64.encode_string (Mirage_crypto_ec.Ed25519.priv_to_octets priv))
+      in
+      let k = Result.get_ok (Conex_mirage_crypto.C.decode_priv id root.Root.created pem) in
+      let pub = pub_of_priv k in
+      let keyid = Key.keyid Conex_mirage_crypto.NC_V.raw_digest pub in
+      if not (Digest.equal hash keyid) then
+        failwith "Private key and root are not equal!"
+      else
+        k
+
+    let prepare root =
+      let ts_k = prep root `Timestamp (Option.get (K.timestamp_key ())) in
+      let snap_k = prep root `Snapshot (Option.get (K.snapshot_key ())) in
+      let target_k = prep root `Maintainer (Option.get (K.target_key ())) in
+      Keys.add `Timestamp ts_k (Keys.add `Snapshot snap_k (Keys.singleton `Maintainer target_k))
+
+    let sign key id alg wire =
+      let now = Ptime.to_rfc3339 ~tz_offset_s:0 (Mirage_ptime.now ()) in
+      let data = Wire.to_string (to_be_signed wire now id alg) in
+      let* signature = Conex_mirage_crypto.C.sign key data in
+      Ok (id, now, alg, signature)
+
+    let sign_targets key id alg old_targets targets =
+      let targets = { old_targets with Targets.targets } in
+      if Conex_resource.Targets.equal old_targets targets then
+        Ok old_targets
+      else
+        let* targets =
+          match Conex_utils.Uint.succ targets.Targets.counter with
+          | false, counter -> Ok { targets with Targets.counter }
+          | true, _ -> Error "Couldn't increment counter"
+        in
+        let* signature = sign key id alg (Targets.wire_raw targets) in
+        Ok (Targets.add_signature targets id signature)
+
+    let sign_snapshot key id alg old_snapshot targets =
+      let snapshot = { old_snapshot with Snapshot.targets } in
+      if Snapshot.equal snapshot old_snapshot then
+        Ok old_snapshot
+      else
+        let* snapshot =
+          match Conex_utils.Uint.succ snapshot.Snapshot.counter with
+          | false, counter -> Ok { snapshot with Snapshot.counter }
+          | true, _ -> Error "Couldn't increment counter"
+        in
+        let* signature = sign key id alg (Snapshot.wire_raw snapshot) in
+        Ok (Snapshot.add_signature snapshot id signature)
+
+    let sign_timestamp ?targets key id alg old_timestamp =
+      let timestamp =
+        match targets with
+        | None -> old_timestamp
+        | Some targets ->
+          { old_timestamp with Timestamp.targets }
+      in
+      let timestamp = { timestamp with created = Ptime.to_rfc3339 ~tz_offset_s:0 (Mirage_ptime.now ()) } in
+      let* timestamp =
+        match Conex_utils.Uint.succ timestamp.Timestamp.counter with
+        | false, counter -> Ok { timestamp with Timestamp.counter }
+        | true, _ -> Error "Couldn't increment counter"
+      in
+      let* signature = sign key id alg (Timestamp.wire_raw timestamp) in
+      Ok (Timestamp.add_signature timestamp id signature)
+  end
+
   module Tarball = struct
     module High : sig
       type t
@@ -635,12 +767,13 @@ module Make
       let closed = ref false in
       fun () -> if !closed
         then Tar.High (High.inj (Lwt.return_ok None))
-        else begin closed := true; Tar.High (High.inj (Lwt.return_ok (Some  data))) end
+        else begin closed := true; Tar.High (High.inj (Lwt.return_ok (Some data))) end
 
-    let entries_of_git ~mtime store repo urls =
+    let entries_of_git ~mtime store repo urls targets tar_entries =
       let entries = Git.contents store in
       let to_entry path =
-        match Mirage_kv.Key.segments path with
+        let segs = Mirage_kv.Key.segments path in
+        match segs with
         (* from opam source code, src/repository/opamHTTP.ml:
            include only three top-level dirs/files: packages, version, repo *)
         | "packages" :: _
@@ -661,27 +794,139 @@ module Make
               let hdr = Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
                   (Mirage_kv.Key.to_string path) (Int64.of_int size) in
               urls := Git.find_urls !urls path data;
+              tar_entries := (hdr, data) :: !tar_entries;
+              (match segs, List.rev segs with
+               | "packages" :: _, "opam" :: _ ->
+                 let digest = [ Conex_mirage_crypto.NC_V.raw_digest data ] in
+                 targets := Conex_resource.Target.{ filename = segs ; digest ; size = Conex_utils.Uint.of_int_exn size } :: !targets
+               | _ -> ());
               Some (Some Tar.Header.Ustar, hdr, once data)
             | Error _ -> None
           end
         | _ -> Lwt.return None
       in
-      let entries = Lwt_stream.filter_map_s to_entry entries in
-      Lwt.return begin fun () -> Tar.High (High.inj (Lwt_stream.get entries >|= Result.ok)) end
+      Lwt_stream.filter_map_s to_entry entries
 
-    let of_git repo store =
+    let add_entry mtime path data =
+      let file_mode = 0o644
+      and mod_time = Int64.of_int mtime
+      and user_id = 0
+      and group_id = 0
+      and size = String.length data in
+      let hdr = Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
+          (String.concat "/" path) (Int64.of_int size)
+      in
+      hdr, (Some Tar.Header.Ustar, hdr, once data)
+
+    let of_git root ?old_targets ?old_snapshot ?old_timestamp keys repo store =
       let now = Mirage_ptime.now () in
       let mtime = Option.value ~default:0 Ptime.(Span.to_int_s (to_span now)) in
+      let now_str = Ptime.to_rfc3339 ~tz_offset_s:0 now in
       let urls = ref SM.empty in
-      entries_of_git ~mtime store repo urls >>= fun entries ->
+      let targets = ref [] in
+      let tar_entries = ref [] in
+      let entries = entries_of_git ~mtime store repo urls targets tar_entries in
       Git.empty ();
-      let t = Tar.out ~level:Ustar entries in
+      let targets =
+        let priv = Keys.find `Maintainer keys in
+        let id = Conex.find_id_by_role root `Maintainer in
+        let old_targets = match old_targets with
+          | None ->
+            let open Conex_resource in
+            let pub = Conex.pub_of_priv priv in
+            let keyref = Expression.Local id in
+            let keys = Conex_utils.M.add id pub Conex_utils.M.empty in
+            let valid = Expression.(Quorum (1, KS.singleton keyref)) in
+            Targets.t ~keys now_str id valid
+          | Some o -> o
+        in
+        Result.get_ok (Conex.sign_targets priv id `Ed25519 old_targets !targets)
+      in
+      let target_path = root.Conex_resource.Root.keydir @ [ targets.Conex_resource.Targets.name ] in
+      let target_data = Conex_opam_encoding.encode (Conex_resource.Targets.wire targets) in
+      let snap =
+        let targets =
+          Conex_resource.Target.{ filename = target_path ; size = Conex_utils.Uint.of_int_exn (String.length target_data) ;
+                                  digest = [ Conex_mirage_crypto.NC_V.raw_digest target_data ] }
+        in
+        let priv = Keys.find `Snapshot keys in
+        let id = Conex.find_id_by_role root `Snapshot in
+        let old_snapshot = match old_snapshot with
+          | None ->
+            let keys =
+              let public = Conex.pub_of_priv priv in
+              Conex_utils.M.singleton id public
+            in
+            Conex_resource.Snapshot.t ~keys now_str id
+          | Some s -> s
+        in
+        Result.get_ok (Conex.sign_snapshot priv id `Ed25519 old_snapshot [ targets ])
+      in
+      let snap_path = [ snap.Conex_resource.Snapshot.name ] in
+      let snap_data = Conex_opam_encoding.encode (Conex_resource.Snapshot.wire snap) in
+      let timestamp =
+        let snap =
+          Conex_resource.Target.{ filename = snap_path ; size = Conex_utils.Uint.of_int_exn (String.length snap_data) ;
+                                  digest = [ Conex_mirage_crypto.NC_V.raw_digest snap_data ] }
+        in
+        let priv = Keys.find `Timestamp keys in
+        let id = Conex.find_id_by_role root `Timestamp in
+        let old_timestamp = match old_timestamp with
+          | None ->
+            let keys =
+              let public = Conex.pub_of_priv priv in
+              Conex_utils.M.singleton id public
+            in
+            Conex_resource.Timestamp.t ~keys now_str id
+          | Some t -> t
+        in
+        Result.get_ok
+          (Conex.sign_timestamp ~targets:[ snap ] priv id `Ed25519 old_timestamp)
+      in
+      let timestamp_path = [ timestamp.Conex_resource.Timestamp.name ] in
+      let timestamp_data = Conex_opam_encoding.encode (Conex_resource.Timestamp.wire timestamp) in
+      let root_data = Conex_opam_encoding.encode (Conex_resource.Root.wire root) in
+      let root_hdr, root_e = add_entry mtime ["root"] root_data in
+      let target_hdr, target_e = add_entry mtime target_path target_data in
+      let snap_hdr, snap_e = add_entry mtime snap_path snap_data in
+      let timestamp_hdr, timestamp_e = add_entry mtime timestamp_path timestamp_data in
+      let conex_entries = Lwt_stream.of_list [ root_e ; target_e ; snap_e ; timestamp_e ] in
+      let e = Lwt_stream.append entries conex_entries in
+      let t = Tar.out ~level:Ustar (fun () -> (Tar.High (High.inj (Lwt_stream.get e >|= Result.ok)))) in
       let t = Tar_gz.out_gzipped ~level:4 ~mtime:(Int32.of_int mtime) Gz.Unix t in
       let buf = Buffer.create 1024 in
       to_buffer buf t >|= function
-      | Ok () -> Buffer.contents buf, !urls
+      | Ok () -> Buffer.contents buf, !urls, ((root_hdr, root_data) :: (target_hdr, target_data) :: (snap_hdr, snap_data) :: !tar_entries), targets, snap, timestamp
       | Error (`Msg msg) -> failwith msg
   end
+
+  let update_timestamp old_timestamp entries id key =
+    let timestamp = Result.get_ok (Conex.sign_timestamp key id `Ed25519 old_timestamp) in
+    let mtime = Option.value ~default:0 Ptime.(Span.to_int_s (to_span (Mirage_ptime.now ()))) in
+    let timestamp_path = [ timestamp.Conex_resource.Timestamp.name ] in
+    let timestamp_data = Conex_opam_encoding.encode (Conex_resource.Timestamp.wire timestamp) in
+    let timestamp_hdr =
+      let file_mode = 0o644
+      and mod_time = Int64.of_int mtime
+      and user_id = 0
+      and group_id = 0
+      and size = String.length timestamp_data in
+      Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
+          (String.concat "/" timestamp_path) (Int64.of_int size)
+    in
+    let entry_stream =
+      Lwt_stream.of_list (List.map (fun (hdr, data) ->
+          Some Tar.Header.Ustar, hdr, Tarball.once data)
+          ((timestamp_hdr, timestamp_data) :: entries))
+    in
+    let t =
+      Tar.out ~level:Ustar (fun () -> (Tar.High (Tarball.High.inj (Lwt_stream.get entry_stream >|= Result.ok))))
+    in
+      let t = Tar_gz.out_gzipped ~level:4 ~mtime:(Int32.of_int mtime) Gz.Unix t in
+      let buf = Buffer.create 1024 in
+      Tarball.to_buffer buf t >|= function
+      | Ok () -> Buffer.contents buf, timestamp
+      | Error (`Msg msg) -> failwith msg
 
   module Serve = struct
     let ptime_to_http_date ptime =
@@ -730,16 +975,20 @@ stamp: %S
       mutable modified : string ;
       mutable repo : string ;
       mutable index : string ;
+      mutable entries : (Tar.Header.t * string) list ;
+      mutable targets : Conex_resource.Targets.t ;
+      mutable snapshot : Conex_resource.Snapshot.t ;
+      mutable timestamp : Conex_resource.Timestamp.t ;
     }
 
     let marshal t =
-      let version = char_of_int 1 in
+      let version = char_of_int 2 in
       String.make 1 version ^ Marshal.to_string t []
 
     let unmarshal s =
       let version = int_of_char s.[0] in
       match version with
-      | 1 -> Ok (Marshal.from_string s 1)
+      | 2 -> Ok (Marshal.from_string s 1)
       | _ -> Error ("Unsupported version " ^ string_of_int version)
 
     let dump_index index_dump t =
@@ -750,29 +999,33 @@ stamp: %S
       | Error e ->
         Logs.warn (fun m -> m "failed to dump index: %a" Cache.pp_write_error e)
 
-    let restore_index index_dump =
-      Cache.read index_dump >|= function
-      | Ok None -> Error ()
+    let restore_index root keys index_dump =
+      Cache.read index_dump >>= function
+      | Ok None -> Lwt.return (Error ())
       | Error e ->
         Logs.warn (fun m -> m "failed to read index state: %a" Cache.pp_error e);
-        Error ()
+        Lwt.return (Error ())
       | Ok Some data ->
         match unmarshal data with
         | Error msg ->
           Logs.warn (fun m -> m "failed to decode index: %s" msg);
-          Error ()
-        | Ok t -> Ok t
+          Lwt.return (Error ())
+        | Ok t ->
+          update_timestamp t.timestamp t.entries (Conex.find_id_by_role root `Timestamp) (Keys.find `Timestamp keys) >>= fun (index, ts) ->
+          t.timestamp <- ts;
+          t.index <- index;
+          Lwt.return (Ok t)
 
-    let create remote git_kv =
+    let create root keys remote git_kv =
       let commit_id = commit_id git_kv in
       modified git_kv >>= fun modified ->
       let repo = repo remote commit_id in
-      Tarball.of_git repo git_kv >|= fun (index, urls) ->
-      { commit_id ; modified ; repo ; index }, urls
+      Tarball.of_git root keys repo git_kv >|= fun (index, urls, entries, targets, snapshot, timestamp) ->
+      { commit_id ; modified ; repo ; index ; entries ; targets ; snapshot ; timestamp }, urls
 
     let update_lock = Lwt_mutex.create ()
 
-    let update_git ~remote t git_kv =
+    let update_git root keys ~remote t git_kv =
       Lwt_mutex.with_lock update_lock (fun () ->
           Logs.info (fun m -> m "pulling the git repository");
           last_git := Mirage_ptime.now ();
@@ -792,11 +1045,15 @@ stamp: %S
             Logs.info (fun m -> m "git: %s" commit_id);
             let repo = repo remote commit_id in
             reset_parse_errors ();
-            Tarball.of_git repo git_kv >|= fun (index, urls) ->
-            t.commit_id <- commit_id ;
-            t.modified <- modified ;
-            t.repo <- repo ;
+            Tarball.of_git root ~old_targets:t.targets ~old_snapshot:t.snapshot ~old_timestamp:t.timestamp keys repo git_kv >|= fun (index, urls, entries, targets, snapshot, timestamp) ->
+            t.commit_id <- commit_id;
+            t.modified <- modified;
+            t.repo <- repo;
             t.index <- index;
+            t.entries <- entries;
+            t.targets <- targets;
+            t.snapshot <- snapshot;
+            t.timestamp <- timestamp;
             Some (changes, urls))
 
     let status t disk =
@@ -1108,7 +1365,28 @@ stamp: %S
 
   module Paf = Paf_mirage.Make(Stack.TCP)
 
-  let start_mirror { Part.tar; swap; index; git_dump; md5s; sha512s } stack git_ctx http_ctx =
+  let read_root block =
+    let strip_0_suffix cfg =
+      let rec find0 idx =
+        if idx < Cstruct.length cfg then
+          if Cstruct.get_uint8 cfg idx = 0 then idx else find0 (succ idx)
+        else idx
+      in
+      Cstruct.sub cfg 0 (find0 0)
+    in
+    ROOT.get_info block >>= fun { Mirage_block.sector_size; size_sectors; _ } ->
+    let data =
+      let rec more acc = function
+        | 0 -> acc
+        | n -> more (Cstruct.create sector_size :: acc) (pred n)
+      in
+      more [] (Int64.to_int size_sectors)
+    in
+    ROOT.read block 0L data >|= function
+    | Ok () -> Ok (Cstruct.to_string (strip_0_suffix (Cstruct.concat data)))
+    | Error e -> Error (`Msg (Fmt.to_to_string ROOT.pp_error e))
+
+  let start_mirror { Part.tar; swap; index; git_dump; md5s; sha512s } root stack git_ctx http_ctx =
     KV.connect tar >>= fun kv ->
     Cache.connect git_dump >>= fun git_dump ->
     Cache.connect md5s >>= fun md5s ->
@@ -1142,82 +1420,90 @@ stamp: %S
           git_kv := Some git;
           Lwt.return (need_dump, git)
         in
-        let update serve () =
-          match !git_kv with
-          | None ->
-            Logs.warn (fun m -> m "git kv is not ready yet, thus not updating");
-            Lwt.return_unit
-          | Some git_kv ->
-            if Disk.completely_checked disk then
-              Serve.update_git ~remote serve git_kv >>= function
-              | None | Some ([], _) -> Lwt.return_unit
-              | Some (_changes, urls) ->
-                Serve.dump_index index serve >>= fun () ->
-                dump_git git_dump git_kv >>= fun () ->
-                download_archives (K.parallel_downloads ()) disk http_ctx urls
-            else begin
-              Logs.warn (fun m -> m "disk is not ready yet, thus not updating");
-              Lwt.return_unit
-            end
-        in
-        Logs.info (fun m -> m "Restoring index.");
-        (Serve.restore_index index >>= function
-          | Ok serve ->
-            let service =
-              Paf.http_service
-                ~error_handler:(fun _ ?request:_ _ _ -> ())
-                (Serve.dispatch serve disk (K.hook_url ()) (update serve))
+        read_root root >>= function
+        | Error `Msg e -> failwith e
+        | Ok root ->
+          match Result.join (Result.map Conex_resource.Root.of_wire (Conex_opam_encoding.decode root)) with
+          | Error e -> failwith e
+          | Ok (root, _) ->
+            Logs.info (fun m -> m "Preparing conex keys.");
+            let keys = Conex.prepare root in
+            let update serve () =
+              match !git_kv with
+              | None ->
+                Logs.warn (fun m -> m "git kv is not ready yet, thus not updating");
+                Lwt.return_unit
+              | Some git_kv ->
+                if Disk.completely_checked disk then
+                  Serve.update_git root keys ~remote serve git_kv >>= function
+                  | None | Some ([], _) -> Lwt.return_unit
+                  | Some (_changes, urls) ->
+                    Serve.dump_index index serve >>= fun () ->
+                    dump_git git_dump git_kv >>= fun () ->
+                    download_archives (K.parallel_downloads ()) disk http_ctx urls
+                else begin
+                  Logs.warn (fun m -> m "disk is not ready yet, thus not updating");
+                  Lwt.return_unit
+                end
             in
-            let `Initialized th = Paf.serve service t in
-            Logs.info (fun f -> f "listening on %d/HTTP" (K.port ()));
-            Lwt.return (serve, true, th, false, SM.empty)
-          | Error () ->
-            init_git_kv () >>= fun (need_dump, git) ->
-            let commit_id = Serve.commit_id git in
-            Logs.info (fun m -> m "git: %s" commit_id);
-            Serve.create remote git >>= fun (serve, urls) ->
-            let service =
-              Paf.http_service
-                ~error_handler:(fun _ ?request:_ _ _ -> ())
-                (Serve.dispatch serve disk (K.hook_url ()) (update serve))
-            in
-            let `Initialized th = Paf.serve service t in
-            Logs.info (fun f -> f "listening on %d/HTTP" (K.port ()));
-            Lwt.return (serve, false, th, need_dump, urls))
-        >>= fun (serve, need_git_update, th, need_dump, urls) ->
-        Lwt.join [
-          (if need_git_update then
-             init_git_kv () >>= fun (need_dump, git) ->
-             let commit_id = Serve.commit_id git in
-             Logs.info (fun m -> m "dumping git state %s" commit_id);
-             Serve.dump_index index serve >>= fun () ->
-             dump_git git_dump git
-           else if need_dump then
-             match !git_kv with
-             | None ->
-               Logs.err (fun m -> m "git_kv not yet set");
-               Lwt.return_unit
-             | Some git ->
-               let commit_id = Serve.commit_id git in
-               Logs.info (fun m -> m "dumping git state %s" commit_id);
-               Serve.dump_index index serve >>= fun () ->
-               dump_git git_dump git
-           else
-             Lwt.return_unit) ;
-          (Disk.check ~skip_verify_sha256:(K.skip_verify_sha256 ()) disk)
-        ] >>= fun () ->
-        Lwt.async (fun () ->
-            let rec go () =
-              Mirage_sleep.ns (Duration.of_hour 1) >>= fun () ->
-              update serve () >>= fun () ->
-              go ()
-            in
-            go ());
-        download_archives (K.parallel_downloads ()) disk http_ctx urls >>= fun () ->
-        (th >|= fun _v -> ())
+            Logs.info (fun m -> m "Restoring index.");
+            (Serve.restore_index root keys index >>= function
+              | Ok serve ->
+                let service =
+                  Paf.http_service
+                    ~error_handler:(fun _ ?request:_ _ _ -> ())
+                    (Serve.dispatch serve disk (K.hook_url ()) (update serve))
+                in
+                let `Initialized th = Paf.serve service t in
+                Logs.info (fun f -> f "listening on %d/HTTP" (K.port ()));
+                Lwt.return (serve, true, th, false, SM.empty)
+              | Error () ->
+                init_git_kv () >>= fun (need_dump, git) ->
+                let commit_id = Serve.commit_id git in
+                Logs.info (fun m -> m "git: %s" commit_id);
+                Serve.create root keys remote git >>= fun (serve, urls) ->
+                let service =
+                  Paf.http_service
+                    ~error_handler:(fun _ ?request:_ _ _ -> ())
+                    (Serve.dispatch serve disk (K.hook_url ()) (update serve))
+                in
+                let `Initialized th = Paf.serve service t in
+                Logs.info (fun f -> f "listening on %d/HTTP" (K.port ()));
+                Lwt.return (serve, false, th, need_dump, urls))
+            >>= fun (serve, need_git_update, th, need_dump, urls) ->
+            Lwt.join [
+              (if need_git_update then
+                 init_git_kv () >>= fun (need_dump, git) ->
+                 let commit_id = Serve.commit_id git in
+                 Logs.info (fun m -> m "dumping git state %s" commit_id);
+                 Serve.dump_index index serve >>= fun () ->
+                 dump_git git_dump git
+               else if need_dump then
+                 match !git_kv with
+                 | None ->
+                   Logs.err (fun m -> m "git_kv not yet set");
+                   Lwt.return_unit
+                 | Some git ->
+                   let commit_id = Serve.commit_id git in
+                   Logs.info (fun m -> m "dumping git state %s" commit_id);
+                   Serve.dump_index index serve >>= fun () ->
+                   dump_git git_dump git
+               else
+                 Lwt.return_unit) ;
+              (Disk.check ~skip_verify_sha256:(K.skip_verify_sha256 ()) disk)
+            ] >>= fun () ->
+            Lwt.async (fun () ->
+                let rec go () =
+                  Mirage_sleep.ns (Duration.of_hour 1) >>= fun () ->
+                  update serve () >>= fun () ->
+                  go ()
+                in
+                go ());
+            download_archives (K.parallel_downloads ()) disk http_ctx urls >>= fun () ->
+            (th >|= fun _v -> ())
       end
 
-  let start block stack git_ctx http_ctx =
+  let start block root stack git_ctx http_ctx =
     let initialize_disk = K.initialize_disk ()
     and cache_size = K.cache_size ()
     and git_size = K.git_size ()
@@ -1237,5 +1523,5 @@ stamp: %S
         exit 2
     else
       Part.connect block >>= fun parts ->
-      start_mirror parts stack git_ctx http_ctx
+      start_mirror parts root stack git_ctx http_ctx
 end
