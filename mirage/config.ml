@@ -19,14 +19,18 @@ let mirror =
       package "oneffs" ;
       package "digestif" ;
       package "swapfs" ;
+      package "conex" ;
+      package "conex-mirage-crypto" ;
     ]
-    (block @-> stackv4v6 @-> git_client @-> alpn_client @-> job)
+    (block @-> block @-> stackv4v6 @-> git_client @-> alpn_client @-> job)
 
 let stack = generic_stackv4v6 default_network
 let he = generic_happy_eyeballs stack
 let dns = generic_dns_client stack he
 let tcp = tcpv4v6_of_stackv4v6 stack
 let block = block_of_file "tar"
+
+let root = block_of_file "root"
 
 let git_client, alpn_client =
   let git = mimic_happy_eyeballs stack he dns in
@@ -36,4 +40,4 @@ let git_client, alpn_client =
   paf_client tcp (mimic_happy_eyeballs stack he dns)
 
 let () = register "mirror"
-  [ mirror $ block $ stack $ git_client $ alpn_client ]
+  [ mirror $ block $ root $ stack $ git_client $ alpn_client ]
