@@ -778,7 +778,7 @@ stamp: %S
           last_git := Mirage_ptime.now ();
           Git_kv.pull git_kv >>= function
           | Error `Msg msg ->
-            Logs.err (fun m -> m "error %s while updating git" msg);
+            Logs.err (fun m -> m "error while updating git: %s" msg);
             last_git_status := Error msg;
             Lwt.return None
           | Ok [] ->
