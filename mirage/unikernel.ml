@@ -1,5 +1,8 @@
 open Lwt.Infix
 
+let pem_of_str k =
+  "-----BEGIN PRIVATE KEY-----\n" ^ k ^ "\n-----END PRIVATE KEY-----"
+
 module K = struct
   open Cmdliner
 
@@ -90,13 +93,11 @@ module K = struct
   let ed_key =
     Arg.conv ~docv:"ED25519 key (base64 encoded)"
       ((fun s ->
-          Result.bind (Base64.decode s)
-            (fun s ->
-               (Result.map_error
-                  (fun e -> `Msg (Fmt.to_to_string Mirage_crypto_ec.pp_error e))
-                  (Mirage_crypto_ec.Ed25519.priv_of_octets s)))),
-       (fun ppf v -> Fmt.string ppf
-           (Base64.encode_string (Mirage_crypto_ec.Ed25519.priv_to_octets v))))
+          match X509.Private_key.decode_pem (pem_of_str s) with
+          | Ok `ED25519 _ as k -> k
+          | Ok _ -> Error (`Msg "expected ED25519 key")
+          | Error _ as e -> e),
+       (fun ppf v -> Fmt.string ppf (X509.Private_key.encode_pem v)))
 
   let target_key =
     let doc = Arg.info ~doc:"Private key for target" ["target-key"] in
@@ -652,9 +653,6 @@ module Make
          | Local _ -> failwith "received local expression, expected remote")
       | _ -> failwith "couldn't find id by role"
 
-    let pem_of_ed25519 k =
-      "-----BEGIN PRIVATE KEY-----\n" ^ k ^ "\n-----END PRIVATE KEY-----"
-
     let pub_of_priv t =
       let open Conex_mirage_crypto.C in
       let pub = pub_of_priv t in
@@ -664,9 +662,7 @@ module Make
       let id = find_id_by_role root role
       and hash = find_hash_by_role root role
       in
-      let pem =
-        pem_of_ed25519 (Base64.encode_string (Mirage_crypto_ec.Ed25519.priv_to_octets priv))
-      in
+      let pem = X509.Private_key.encode_pem priv in
       let k = Result.get_ok (Conex_mirage_crypto.C.decode_priv id root.Root.created pem) in
       let pub = pub_of_priv k in
       let keyid = Key.keyid Conex_mirage_crypto.NC_V.raw_digest pub in
