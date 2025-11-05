@@ -1013,6 +1013,8 @@ stamp: %S
       mutable timestamp : Conex_resource.Timestamp.t ;
     }
 
+    let update_lock = Lwt_mutex.create ()
+
     let marshal t =
       let version = char_of_int 2 in
       String.make 1 version ^ Marshal.to_string t []
@@ -1043,13 +1045,14 @@ stamp: %S
           Logs.warn (fun m -> m "failed to decode index: %s" msg);
           Lwt.return (Error ())
         | Ok t ->
-          update_timestamp t.timestamp t.entries (Conex.find_id_by_role root `Timestamp) (Keys.find `Timestamp keys) >>= fun (index, ts, modified) ->
-          t.timestamp <- ts;
-          t.index <- index;
-          t.modified <- modified;
-          Logs.info (fun m -> m "updated timestamp after restore");
-          dump_index index_dump t >>= fun () ->
-          Lwt.return (Ok t)
+          Lwt_mutex.with_lock update_lock (fun () ->
+              update_timestamp t.timestamp t.entries (Conex.find_id_by_role root `Timestamp) (Keys.find `Timestamp keys) >>= fun (index, ts, modified) ->
+              t.timestamp <- ts;
+              t.index <- index;
+              t.modified <- modified;
+              Logs.info (fun m -> m "updated timestamp after restore");
+              dump_index index_dump t >>= fun () ->
+              Lwt.return (Ok t))
 
     let create root keys remote git_kv =
       let commit_id = commit_id git_kv in
@@ -1057,8 +1060,6 @@ stamp: %S
       let repo = repo remote commit_id in
       Tarball.of_git root keys repo git_kv >|= fun (index, urls, entries, targets, snapshot, timestamp) ->
       { commit_id ; modified ; repo ; index ; entries ; targets ; snapshot ; timestamp }, urls
-
-    let update_lock = Lwt_mutex.create ()
 
     let update_serve root keys ~remote t git_kv changes =
       last_git_status := Ok (List.length changes);
@@ -1479,7 +1480,8 @@ stamp: %S
                   Serve.update_git root keys ~remote serve git_kv >>= function
                   | None | Some ([], _) -> Lwt.return_unit
                   | Some (_changes, urls) ->
-                    Serve.dump_index index serve >>= fun () ->
+                    Lwt_mutex.with_lock Serve.update_lock (fun () ->
+                        Serve.dump_index index serve) >>= fun () ->
                     dump_git git_dump git_kv >>= fun () ->
                     download_archives (K.parallel_downloads ()) disk http_ctx urls
                 else begin
@@ -1520,8 +1522,7 @@ stamp: %S
                  Logs.info (fun m -> m "dumping git state %s" commit_id);
                  Lwt_mutex.with_lock Serve.update_lock (fun () ->
                      Serve.update_serve root keys ~remote serve git [] >>= fun _ ->
-                     Lwt.return_unit) >>= fun () ->
-                 Serve.dump_index index serve >>= fun () ->
+                     Serve.dump_index index serve) >>= fun () ->
                  dump_git git_dump git
                else if need_dump then
                  match !git_kv with
@@ -1531,7 +1532,8 @@ stamp: %S
                  | Some git ->
                    let commit_id = Serve.commit_id git in
                    Logs.info (fun m -> m "dumping git state %s" commit_id);
-                   Serve.dump_index index serve >>= fun () ->
+                   Lwt_mutex.with_lock Serve.update_lock (fun () ->
+                       Serve.dump_index index serve) >>= fun () ->
                    dump_git git_dump git
                else
                  Lwt.return_unit) ;
@@ -1549,12 +1551,13 @@ stamp: %S
                   Mirage_sleep.ns (Duration.of_min 5) >>= fun () ->
                   let ts_id = Conex.find_id_by_role root `Timestamp in
                   let ts_key = Keys.find `Timestamp keys in
-                  update_timestamp serve.timestamp serve.entries ts_id ts_key >>= fun (index', ts, modified) ->
-                  serve.index <- index';
-                  serve.timestamp <- ts;
-                  serve.modified <- modified;
-                  Serve.dump_index index serve >>= fun () ->
-                  Logs.info (fun m -> m "signed timestamp");
+                  Lwt_mutex.with_lock Serve.update_lock (fun () ->
+                      update_timestamp serve.timestamp serve.entries ts_id ts_key >>= fun (index', ts, modified) ->
+                      serve.index <- index';
+                      serve.timestamp <- ts;
+                      serve.modified <- modified;
+                      Serve.dump_index index serve >|= fun () ->
+                      Logs.info (fun m -> m "signed timestamp")) >>= fun () ->
                   go ()
                 in
                 go ());
