@@ -1070,7 +1070,7 @@ module Make
 
     let update_lock = Lwt_mutex.create ()
 
-    let update_serve ~remote t git_kv changes =
+    let update_serve root keys ~remote t git_kv changes =
       last_git_status := Ok (Some (List.length changes));
       let commit_id = commit_id git_kv in
       modified git_kv >>= fun modified ->
@@ -1102,7 +1102,7 @@ module Make
             Logs.info (fun m -> m "git changes are empty");
             last_git_status := Ok (Some 0);
             Lwt.return (Some ([], SM.empty))
-          | Ok changes -> update_serve ~remote t git_kv changes)
+          | Ok changes -> update_serve root keys ~remote t git_kv changes)
 
     let status t disk =
       (* report status:
@@ -1528,6 +1528,7 @@ module Make
                 init_git_kv () >>= fun (need_dump, git) ->
                 let commit_id = Serve.commit_id git in
                 Logs.info (fun m -> m "git: %s" commit_id);
+                Logs.info (fun m -> m "creating serve");
                 Serve.create root keys remote git >>= fun (serve, urls) ->
                 let service =
                   Paf.http_service
@@ -1543,6 +1544,9 @@ module Make
                  init_git_kv () >>= fun (need_dump, git) ->
                  let commit_id = Serve.commit_id git in
                  Logs.info (fun m -> m "dumping git state %s" commit_id);
+                 Lwt_mutex.with_lock Serve.update_lock (fun () ->
+                     Serve.update_serve root keys ~remote serve git [] >>= fun _ ->
+                     Lwt.return_unit) >>= fun () ->
                  Serve.dump_index index serve >>= fun () ->
                  dump_git git_dump git
                else if need_dump then
