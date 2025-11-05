@@ -1010,6 +1010,8 @@ stamp: %S
           t.timestamp <- ts;
           t.index <- index;
           t.modified <- modified;
+          Logs.info (fun m -> m "updated timestamp after restore");
+          dump_index index_dump t >>= fun () ->
           Lwt.return (Ok t)
 
     let create root keys remote git_kv =
@@ -1335,17 +1337,21 @@ stamp: %S
     Logs.info (fun m -> m "downloading of %d urls done" (SM.cardinal urls))
 
   let dump_git git_dump git_kv =
-    let stream = Git_kv.to_octets git_kv in
+    Logs.info (fun m -> m "not dumping git");
+    Lwt.return_unit
+(*    let stream = Git_kv.to_octets git_kv in
     Lwt_stream.to_list stream >>= fun datas ->
     let data = String.concat "" datas in
     Cache.write git_dump data >|= function
     | Ok () ->
       Logs.info (fun m -> m "dumped git %d bytes" (String.length data))
     | Error e ->
-      Logs.warn (fun m -> m "failed to dump git: %a" Cache.pp_write_error e)
+      Logs.warn (fun m -> m "failed to dump git: %a" Cache.pp_write_error e) *)
 
   let restore_git ~remote git_dump git_ctx =
-    Cache.read git_dump >>= function
+    Logs.info (fun m -> m "not restoring git");
+    Lwt.return (Error ())
+(*    Cache.read git_dump >>= function
     | Ok None -> Lwt.return (Error ())
     | Error e ->
       Logs.warn (fun m -> m "failed to read git state: %a" Cache.pp_error e);
@@ -1356,7 +1362,7 @@ stamp: %S
       | Ok git_kv -> Ok git_kv
       | Error `Msg msg ->
         Logs.err (fun m -> m "error restoring git state: %s" msg);
-        Error ()
+        Error ()*)
 
   module Paf = Paf_mirage.Make(Stack.TCP)
 
