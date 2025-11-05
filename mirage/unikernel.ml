@@ -653,9 +653,7 @@ module Make
       | _ -> failwith "couldn't find id by role"
 
     let pem_of_ed25519 k =
-    {|-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEA|} ^ k ^ {|
------END PUBLIC KEY-----|}
+      "-----BEGIN PRIVATE KEY-----\n" ^ k ^ "\n-----END PRIVATE KEY-----"
 
     let pub_of_priv t =
       let open Conex_mirage_crypto.C in
