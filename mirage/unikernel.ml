@@ -1060,6 +1060,24 @@ stamp: %S
 
     let update_lock = Lwt_mutex.create ()
 
+    let update_serve root keys ~remote t git_kv changes =
+      last_git_status := Ok (List.length changes);
+      let commit_id = commit_id git_kv in
+      modified git_kv >>= fun modified ->
+      Logs.info (fun m -> m "git: %s" commit_id);
+      let repo = repo remote commit_id in
+      reset_parse_errors ();
+      Tarball.of_git root ~old_targets:t.targets ~old_snapshot:t.snapshot ~old_timestamp:t.timestamp keys repo git_kv >|= fun (index, urls, entries, targets, snapshot, timestamp) ->
+      t.commit_id <- commit_id;
+      t.modified <- modified;
+      t.repo <- repo;
+      t.index <- index;
+      t.entries <- entries;
+      t.targets <- targets;
+      t.snapshot <- snapshot;
+      t.timestamp <- timestamp;
+      Some (changes, urls)
+
     let update_git root keys ~remote t git_kv =
       Lwt_mutex.with_lock update_lock (fun () ->
           Logs.info (fun m -> m "pulling the git repository");
@@ -1074,22 +1092,7 @@ stamp: %S
             last_git_status := Ok 0;
             Lwt.return (Some ([], SM.empty))
           | Ok changes ->
-            last_git_status := Ok (List.length changes);
-            let commit_id = commit_id git_kv in
-            modified git_kv >>= fun modified ->
-            Logs.info (fun m -> m "git: %s" commit_id);
-            let repo = repo remote commit_id in
-            reset_parse_errors ();
-            Tarball.of_git root ~old_targets:t.targets ~old_snapshot:t.snapshot ~old_timestamp:t.timestamp keys repo git_kv >|= fun (index, urls, entries, targets, snapshot, timestamp) ->
-            t.commit_id <- commit_id;
-            t.modified <- modified;
-            t.repo <- repo;
-            t.index <- index;
-            t.entries <- entries;
-            t.targets <- targets;
-            t.snapshot <- snapshot;
-            t.timestamp <- timestamp;
-            Some (changes, urls))
+            update_serve root keys ~remote t git_kv changes)
 
     let status t disk =
       (* report status:
@@ -1499,6 +1502,7 @@ stamp: %S
                 init_git_kv () >>= fun (need_dump, git) ->
                 let commit_id = Serve.commit_id git in
                 Logs.info (fun m -> m "git: %s" commit_id);
+                Logs.info (fun m -> m "creating serve");
                 Serve.create root keys remote git >>= fun (serve, urls) ->
                 let service =
                   Paf.http_service
@@ -1514,6 +1518,9 @@ stamp: %S
                  init_git_kv () >>= fun (need_dump, git) ->
                  let commit_id = Serve.commit_id git in
                  Logs.info (fun m -> m "dumping git state %s" commit_id);
+                 Lwt_mutex.with_lock Serve.update_lock (fun () ->
+                     Serve.update_serve root keys ~remote serve git [] >>= fun _ ->
+                     Lwt.return_unit) >>= fun () ->
                  Serve.dump_index index serve >>= fun () ->
                  dump_git git_dump git
                else if need_dump then
