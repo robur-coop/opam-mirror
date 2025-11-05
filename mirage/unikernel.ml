@@ -821,76 +821,113 @@ module Make
       let tar_entries = ref [] in
       let entries = entries_of_git ~mtime store repo urls targets tar_entries in
       Git.empty ();
-      let targets =
-        let priv = Keys.find `Maintainer keys in
-        let id = Conex.find_id_by_role root `Maintainer in
-        let old_targets = match old_targets with
-          | None ->
-            let open Conex_resource in
-            let pub = Conex.pub_of_priv priv in
-            let keyref = Expression.Local id in
-            let keys = Conex_utils.M.add id pub Conex_utils.M.empty in
-            let valid = Expression.(Quorum (1, KS.singleton keyref)) in
-            Targets.t ~keys now_str id valid
-          | Some o -> o
-        in
-        Result.get_ok (Conex.sign_targets priv id `Ed25519 old_targets !targets)
-      in
-      let target_path = root.Conex_resource.Root.keydir @ [ targets.Conex_resource.Targets.name ] in
-      let target_data = Conex_opam_encoding.encode (Conex_resource.Targets.wire targets) in
-      let snap =
-        let targets =
-          Conex_resource.Target.{ filename = target_path ; size = Conex_utils.Uint.of_int_exn (String.length target_data) ;
-                                  digest = [ Conex_mirage_crypto.NC_V.raw_digest target_data ] }
-        in
-        let priv = Keys.find `Snapshot keys in
-        let id = Conex.find_id_by_role root `Snapshot in
-        let old_snapshot = match old_snapshot with
-          | None ->
-            let keys =
-              let public = Conex.pub_of_priv priv in
-              Conex_utils.M.singleton id public
-            in
-            Conex_resource.Snapshot.t ~keys now_str id
-          | Some s -> s
-        in
-        Result.get_ok (Conex.sign_snapshot priv id `Ed25519 old_snapshot [ targets ])
-      in
-      let snap_path = [ snap.Conex_resource.Snapshot.name ] in
-      let snap_data = Conex_opam_encoding.encode (Conex_resource.Snapshot.wire snap) in
-      let timestamp =
-        let snap =
-          Conex_resource.Target.{ filename = snap_path ; size = Conex_utils.Uint.of_int_exn (String.length snap_data) ;
-                                  digest = [ Conex_mirage_crypto.NC_V.raw_digest snap_data ] }
-        in
-        let priv = Keys.find `Timestamp keys in
-        let id = Conex.find_id_by_role root `Timestamp in
-        let old_timestamp = match old_timestamp with
-          | None ->
-            let keys =
-              let public = Conex.pub_of_priv priv in
-              Conex_utils.M.singleton id public
-            in
-            Conex_resource.Timestamp.t ~keys now_str id
-          | Some t -> t
-        in
-        Result.get_ok
-          (Conex.sign_timestamp ~targets:[ snap ] priv id `Ed25519 old_timestamp)
-      in
-      let timestamp_path = [ timestamp.Conex_resource.Timestamp.name ] in
-      let timestamp_data = Conex_opam_encoding.encode (Conex_resource.Timestamp.wire timestamp) in
       let root_data = Conex_opam_encoding.encode (Conex_resource.Root.wire root) in
       let root_hdr, root_e = add_entry mtime ["root"] root_data in
-      let target_hdr, target_e = add_entry mtime target_path target_data in
-      let snap_hdr, snap_e = add_entry mtime snap_path snap_data in
-      let timestamp_hdr, timestamp_e = add_entry mtime timestamp_path timestamp_data in
-      let conex_entries = Lwt_stream.of_list [ root_e ; target_e ; snap_e ; timestamp_e ] in
+      let target_hdr = ref root_hdr in
+      let target_data = ref "" in
+      let snap_hdr = ref root_hdr in
+      let snap_data = ref "" in
+      let ts_hdr = ref root_hdr in
+      let ts_data = ref "" in
+      let tgt = ref None in
+      let snp = ref None in
+      let ts = ref None in
+      let conex_entries =
+        let pos = ref 0 in
+        let ctargets = ref [] in
+        Lwt_stream.from
+          (fun () ->
+             match !pos with
+             | 0 ->
+               incr pos ;
+               Lwt.return (Some root_e)
+             | 1 ->
+               incr pos ;
+               let targets =
+                 let priv = Keys.find `Maintainer keys in
+                 let id = Conex.find_id_by_role root `Maintainer in
+                 let old_targets = match old_targets with
+                   | None ->
+                     let open Conex_resource in
+                     let pub = Conex.pub_of_priv priv in
+                     let keyref = Expression.Local id in
+                     let keys = Conex_utils.M.add id pub Conex_utils.M.empty in
+                     let valid = Expression.(Quorum (1, KS.singleton keyref)) in
+                     Targets.t ~keys now_str id valid
+                   | Some o -> o
+                 in
+                 Result.get_ok (Conex.sign_targets priv id `Ed25519 old_targets !targets)
+               in
+               let target_path = root.Conex_resource.Root.keydir @ [ targets.Conex_resource.Targets.name ] in
+               let data = Conex_opam_encoding.encode (Conex_resource.Targets.wire targets) in
+               ctargets :=
+                 [ Conex_resource.Target.{ filename = target_path ;
+                                           size = Conex_utils.Uint.of_int_exn (String.length data) ;
+                                           digest = [ Conex_mirage_crypto.NC_V.raw_digest data ] } ];
+               let hdr, target_e = add_entry mtime target_path data in
+               target_hdr := hdr;
+               target_data := data;
+               tgt := Some targets;
+               Lwt.return (Some target_e)
+             | 2 ->
+               incr pos;
+               let snap =
+                 let priv = Keys.find `Snapshot keys in
+                 let id = Conex.find_id_by_role root `Snapshot in
+                 let old_snapshot = match old_snapshot with
+                   | None ->
+                     let keys =
+                       let public = Conex.pub_of_priv priv in
+                       Conex_utils.M.singleton id public
+                     in
+                     Conex_resource.Snapshot.t ~keys now_str id
+                   | Some s -> s
+                 in
+                 Result.get_ok (Conex.sign_snapshot priv id `Ed25519 old_snapshot !ctargets)
+               in
+               let snap_path = [ snap.Conex_resource.Snapshot.name ] in
+               let data = Conex_opam_encoding.encode (Conex_resource.Snapshot.wire snap) in
+               let hdr, snap_e = add_entry mtime snap_path data in
+               ctargets :=
+                 [ Conex_resource.Target.{ filename = snap_path ; size = Conex_utils.Uint.of_int_exn (String.length data) ;
+                                           digest = [ Conex_mirage_crypto.NC_V.raw_digest data ] } ];
+               snap_hdr := hdr;
+               snap_data := data;
+               snp := Some snap;
+               Lwt.return (Some snap_e)
+             | 3 ->
+               incr pos;
+               let timestamp =
+                 let priv = Keys.find `Timestamp keys in
+                 let id = Conex.find_id_by_role root `Timestamp in
+                 let old_timestamp = match old_timestamp with
+                   | None ->
+                     let keys =
+                       let public = Conex.pub_of_priv priv in
+                       Conex_utils.M.singleton id public
+                     in
+                     Conex_resource.Timestamp.t ~keys now_str id
+                   | Some t -> t
+                 in
+                 Result.get_ok
+                   (Conex.sign_timestamp ~targets:!ctargets priv id `Ed25519 old_timestamp)
+               in
+               let timestamp_path = [ timestamp.Conex_resource.Timestamp.name ] in
+               let data = Conex_opam_encoding.encode (Conex_resource.Timestamp.wire timestamp) in
+               let hdr, timestamp_e = add_entry mtime timestamp_path data in
+               ts_hdr := hdr;
+               ts_data := data;
+               ts := Some timestamp;
+               Lwt.return (Some timestamp_e)
+             | _ -> Lwt.return None)
+      in
       let e = Lwt_stream.append entries conex_entries in
       let t = Tar.out ~level:Ustar (fun () -> (Tar.High (High.inj (Lwt_stream.get e >|= Result.ok)))) in
       let t = Tar_gz.out_gzipped ~level:4 ~mtime:(Int32.of_int mtime) Gz.Unix t in
       let buf = Buffer.create 1024 in
       to_buffer buf t >|= function
-      | Ok () -> Buffer.contents buf, !urls, ((root_hdr, root_data) :: (target_hdr, target_data) :: (snap_hdr, snap_data) :: !tar_entries), targets, snap, timestamp
+      | Ok () -> Buffer.contents buf, !urls, ((root_hdr, root_data) :: (!target_hdr, !target_data) :: (!snap_hdr, !snap_data) :: !tar_entries),
+                 Option.get !tgt, Option.get !snp, Option.get !ts
       | Error (`Msg msg) -> failwith msg
   end
 
