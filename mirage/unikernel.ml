@@ -1533,6 +1533,7 @@ module Make
                   serve.timestamp <- ts;
                   serve.modified <- modified;
                   Serve.dump_index index serve >>= fun () ->
+                  Logs.info (fun m -> m "signed timestamp");
                   go ()
                 in
                 go ());
