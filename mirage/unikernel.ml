@@ -773,6 +773,20 @@ stamp: %S
 
     let update_lock = Lwt_mutex.create ()
 
+    let update_serve ~remote t git_kv changes =
+      last_git_status := Ok (List.length changes);
+      let commit_id = commit_id git_kv in
+      modified git_kv >>= fun modified ->
+      Logs.info (fun m -> m "git: %s" commit_id);
+      let repo = repo remote commit_id in
+      reset_parse_errors ();
+      Tarball.of_git repo git_kv >|= fun (index, urls) ->
+      t.commit_id <- commit_id ;
+      t.modified <- modified ;
+      t.repo <- repo ;
+      t.index <- index;
+      Some (changes, urls)
+
     let update_git ~remote t git_kv =
       Lwt_mutex.with_lock update_lock (fun () ->
           Logs.info (fun m -> m "pulling the git repository");
@@ -786,19 +800,7 @@ stamp: %S
             Logs.info (fun m -> m "git changes are empty");
             last_git_status := Ok 0;
             Lwt.return (Some ([], SM.empty))
-          | Ok changes ->
-            last_git_status := Ok (List.length changes);
-            let commit_id = commit_id git_kv in
-            modified git_kv >>= fun modified ->
-            Logs.info (fun m -> m "git: %s" commit_id);
-            let repo = repo remote commit_id in
-            reset_parse_errors ();
-            Tarball.of_git repo git_kv >|= fun (index, urls) ->
-            t.commit_id <- commit_id ;
-            t.modified <- modified ;
-            t.repo <- repo ;
-            t.index <- index;
-            Some (changes, urls))
+          | Ok changes -> update_serve ~remote t git_kv changes)
 
     let status t disk =
       (* report status:
@@ -1191,6 +1193,9 @@ stamp: %S
              init_git_kv () >>= fun (need_dump, git) ->
              let commit_id = Serve.commit_id git in
              Logs.info (fun m -> m "dumping git state %s" commit_id);
+             Lwt_mutex.with_lock Serve.update_lock (fun () ->
+                 Serve.update_serve ~remote serve git [] >|= fun _ ->
+                 ()) >>= fun () ->
              Serve.dump_index index serve >>= fun () ->
              dump_git git_dump git
            else if need_dump then
