@@ -1499,10 +1499,11 @@ stamp: %S
                   Mirage_sleep.ns (Duration.of_min 5) >>= fun () ->
                   let ts_id = Conex.find_id_by_role root `Timestamp in
                   let ts_key = Keys.find `Timestamp keys in
-                  update_timestamp serve.timestamp serve.entries ts_id ts_key >>= fun (index, ts, modified) ->
-                  serve.index <- index;
+                  update_timestamp serve.timestamp serve.entries ts_id ts_key >>= fun (index', ts, modified) ->
+                  serve.index <- index';
                   serve.timestamp <- ts;
                   serve.modified <- modified;
+                  Serve.dump_index index serve >>= fun () ->
                   go ()
                 in
                 go ());
