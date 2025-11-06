@@ -86,6 +86,11 @@ module K = struct
     let doc = "Ignore restoring locally saved git repository." in
     let doc = Arg.info ~doc ["ignore-local-git"] in
     Mirage_runtime.register_arg Arg.(value & flag doc)
+
+  let archive_mirrors =
+    let doc = "The archive mirror URL(s) to refer to in the repo file. Defaults to \"/cache\"." in
+    let doc = Arg.info ~doc ["archive-mirror"] in
+    Mirage_runtime.register_arg Arg.(value & opt_all string ["/cache"] doc)
 end
 
 module Make
@@ -712,9 +717,11 @@ module Make
       Fmt.str
         {|opam-version: "2.0"
 upstream: "%s#%s"
-archive-mirrors: "cache"
+archive-mirrors: [%a]
 stamp: %S
-|} upstream commit commit
+|} upstream
+        Fmt.(list ~sep:(any " ") Dump.string) (K.archive_mirrors ())
+        commit commit
 
     let modified git_kv =
       Git_kv.last_modified git_kv Mirage_kv.Key.empty >|= fun r ->
