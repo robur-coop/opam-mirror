@@ -88,9 +88,9 @@ module K = struct
     Mirage_runtime.register_arg Arg.(value & flag doc)
 
   let archive_mirrors =
-    let doc = "The archive mirror URL(s) to refer to in the repo file. Defaults to \"/cache\"." in
+    let doc = "The archive mirror URL(s) to refer to in the repo file. Unless --skip-download is passed \"cache\" is added to the list." in
     let doc = Arg.info ~doc ["archive-mirror"] in
-    Mirage_runtime.register_arg Arg.(value & opt_all string ["/cache"] doc)
+    Mirage_runtime.register_arg Arg.(value & opt_all string [] doc)
 end
 
 module Make
@@ -713,15 +713,15 @@ module Make
         exit 2
 
     let repo remote commit =
-      let upstream = List.hd (String.split_on_char '#' remote) in
-      Fmt.str
-        {|opam-version: "2.0"
-upstream: "%s#%s"
-archive-mirrors: [%a]
-stamp: %S
-|} upstream
-        Fmt.(list ~sep:(any " ") Dump.string) (K.archive_mirrors ())
-        commit commit
+      let upstream = List.hd (String.split_on_char '#' remote) ^ "#" ^ commit in
+      let archive_mirrors =
+        (* Unless we skip downloads we add "cache" to the list *)
+        if K.skip_download () then
+          K.archive_mirrors ()
+        else
+          "cache" :: K.archive_mirrors ()
+      in
+      Opam_file.repo_to_string { Opam_file.upstream; archive_mirrors; stamp = commit }
 
     let modified git_kv =
       Git_kv.last_modified git_kv Mirage_kv.Key.empty >|= fun r ->
