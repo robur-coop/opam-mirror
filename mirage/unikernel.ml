@@ -160,6 +160,7 @@ module Make
         let upstream hm =
           HM.fold
           (fun hash hash_value set ->
+              let hash_value = Ohex.encode hash_value in
               List.fold_left (fun set cache_url ->
                   let url =
                     cache_url ^ "/" ^ Archive_checksum.Hash.to_string hash ^
