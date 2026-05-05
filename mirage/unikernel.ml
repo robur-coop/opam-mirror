@@ -869,9 +869,16 @@ stamp: %S
         in
         header ^ String.concat "" content ^ "</ul>"
       in
-      "<html><head><title>Opam-mirror status page</title></head><body><h1>Opam mirror status</h1><div>"
-      ^ String.concat "</div><div>" [ archive_stats ; active_downloads ; failed_downloads ; parse_errors ]
-        ^ "</div></body></html>"
+      let head =
+        "<html><head><title>Opam-mirror status page</title></head><body><h1>Opam mirror status</h1><div>"
+      and foot = "</div></body></html>"
+      in
+      if K.skip_download () then
+        String.concat "" [ head ; archive_stats ; foot ]
+      else
+        head ^
+        String.concat "</div><div>" [ archive_stats ; active_downloads ; failed_downloads ; parse_errors ] ^
+        foot
 
     let not_modified request (modified, etag) =
       match H1.Headers.get request.H1.Request.headers "if-modified-since" with
@@ -1021,42 +1028,42 @@ stamp: %S
   end
 
   let download_archives parallel_downloads disk http_client urls =
-    reset_failed_downloads ();
-    remaining_downloads := SM.cardinal urls;
-    archives := SM.cardinal urls;
-    let pool = Lwt_pool.create parallel_downloads (Fun.const Lwt.return_unit) in
-    Lwt_list.iter_p (fun (url, (csums, mirrors, upstream_caches)) ->
-        Lwt_pool.use pool @@ fun () ->
-        HM.fold (fun h v r ->
-            r >>= function
-            | true -> Disk.exists disk h (hex_to_key v)
-            | false -> Lwt.return false)
-          csums (Lwt.return true) >>= function
-        | true ->
-          decr remaining_downloads;
-          Lwt.return_unit
-        | false ->
-          let rec download url mirrors upstream_caches =
-            let retry () =
-              if SSet.is_empty mirrors && SSet.is_empty upstream_caches then begin
-                decr remaining_downloads;
-                Lwt.return_unit
-              end else if SSet.is_empty mirrors then
-                let elt, upstream_caches =
-                  let e = SSet.min_elt upstream_caches in
-                  e, SSet.remove e upstream_caches
-                in
-                download elt mirrors upstream_caches
-              else
-                let elt, mirrors =
-                  let e = SSet.min_elt mirrors in
-                  e, SSet.remove e mirrors
-                in
-                download elt mirrors upstream_caches
-            in
-            let quux, body_init = Disk.init_write disk csums in
-            add_to_active url (Mirage_ptime.now ());
-            if not (K.skip_download ()) then
+    if not (K.skip_download ()) then begin
+      reset_failed_downloads ();
+      remaining_downloads := SM.cardinal urls;
+      archives := SM.cardinal urls;
+      let pool = Lwt_pool.create parallel_downloads (Fun.const Lwt.return_unit) in
+      Lwt_list.iter_p (fun (url, (csums, mirrors, upstream_caches)) ->
+          Lwt_pool.use pool @@ fun () ->
+          HM.fold (fun h v r ->
+              r >>= function
+              | true -> Disk.exists disk h (hex_to_key v)
+              | false -> Lwt.return false)
+            csums (Lwt.return true) >>= function
+          | true ->
+            decr remaining_downloads;
+            Lwt.return_unit
+          | false ->
+            let rec download url mirrors upstream_caches =
+              let retry () =
+                if SSet.is_empty mirrors && SSet.is_empty upstream_caches then begin
+                  decr remaining_downloads;
+                  Lwt.return_unit
+                end else if SSet.is_empty mirrors then
+                  let elt, upstream_caches =
+                    let e = SSet.min_elt upstream_caches in
+                    e, SSet.remove e upstream_caches
+                  in
+                  download elt mirrors upstream_caches
+                else
+                  let elt, mirrors =
+                    let e = SSet.min_elt mirrors in
+                    e, SSet.remove e mirrors
+                  in
+                  download elt mirrors upstream_caches
+              in
+              let quux, body_init = Disk.init_write disk csums in
+              add_to_active url (Mirage_ptime.now ());
               Http_mirage_client.request http_client url (Disk.write_partial disk quux url) body_init >>= function
               | Ok (resp, r) ->
                 begin match r with
@@ -1083,13 +1090,13 @@ stamp: %S
               | Error me ->
                 add_failed url (Mirage_ptime.now ()) (`Mimic me);
                 retry ()
-            else
-              retry ()
-          in
-          download url mirrors upstream_caches)
-      (SM.bindings urls) >>= fun () ->
-    Disk.update_caches disk >|= fun () ->
-    Logs.info (fun m -> m "downloading of %d urls done" (SM.cardinal urls))
+            in
+            download url mirrors upstream_caches)
+        (SM.bindings urls) >>= fun () ->
+      Disk.update_caches disk >|= fun () ->
+      Logs.info (fun m -> m "downloading of %d urls done" (SM.cardinal urls));
+    end else
+      Lwt.return_unit
 
   let dump_git git_dump git_kv =
     let stream = Git_kv.to_octets git_kv in
