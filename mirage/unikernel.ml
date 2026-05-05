@@ -1221,6 +1221,7 @@ stamp: %S
               ] >>= fun () ->
               go ()
             in
+            Mirage_sleep.ns (Duration.of_hour 1) >>= fun () ->
             go ());
         download_archives (K.parallel_downloads ()) disk http_ctx urls >>= fun () ->
         (th >|= fun _v -> ())
