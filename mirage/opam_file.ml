@@ -142,3 +142,33 @@ let extract_urls filename str =
      [], []
   else
     extract_checksums_and_urls filename opamfile
+
+type repo = {
+  upstream : string;
+  archive_mirrors : string list;
+  stamp : string;
+}
+
+
+let repo_to_string { upstream; archive_mirrors; stamp } =
+  let module T = OpamParserTypes.FullPos in
+  let pos = { T.filename = "repo"; start = (-1, -1); stop = (-1, -1) } in
+  let pelem pelem = { T.pos; pelem } in
+  let var var binding = pelem (T.Variable (pelem var, binding)) in
+  let str s = pelem (T.String s) in
+  let str_list xs = pelem (T.List (pelem (List.map str xs))) in
+  let file_contents =
+    var "opam-version" (str "2.0") ::
+    var "upstream" (str upstream) ::
+    let stamp = var "stamp" (str stamp) in
+    (* empty lists are elided; singleton lists are "unpacked" *)
+    match archive_mirrors with
+    | [] -> [ stamp ]
+    | [ mirror ] ->
+      [ var "archive-mirrors" (str mirror);
+        stamp ]
+    | mirrors ->
+      [ var "archive-mirrors" (str_list archive_mirrors);
+        stamp ]
+  in
+  OpamPrinter.FullPos.opamfile T.{ file_name = "repo"; file_contents }
