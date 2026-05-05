@@ -1071,8 +1071,14 @@ stamp: %S
                     add_failed url (Mirage_ptime.now ()) (`Swap e);
                     retry ()
                   | Ok (digests, body) ->
-                    decr remaining_downloads;
-                    Disk.finalize_write disk quux ~url body csums digests
+                    if Http_mirage_client.Status.is_successful resp.Http_mirage_client.status then begin
+                      decr remaining_downloads;
+                      Disk.finalize_write disk quux ~url body csums digests
+                    end else begin
+                      add_failed url (Mirage_ptime.now ())
+                        (`Bad_response (resp.status, resp.reason));
+                      retry ()
+                    end
                 end
               | Error me ->
                 add_failed url (Mirage_ptime.now ()) (`Mimic me);
