@@ -1214,8 +1214,11 @@ stamp: %S
         ] >>= fun () ->
         Lwt.async (fun () ->
             let rec go () =
-              Mirage_sleep.ns (Duration.of_hour 1) >>= fun () ->
-              update serve () >>= fun () ->
+              Lwt.choose [
+                Mirage_sleep.ns (Duration.of_hour 1);
+                (update serve () >>= fun () ->
+                 Mirage_sleep.ns (Duration.of_hour 1))
+              ] >>= fun () ->
               go ()
             in
             go ());
