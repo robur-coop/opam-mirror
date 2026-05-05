@@ -1220,10 +1220,14 @@ stamp: %S
         ] >>= fun () ->
         Lwt.async (fun () ->
             let rec go () =
-              Mirage_sleep.ns (Duration.of_hour 1) >>= fun () ->
-              update serve () >>= fun () ->
+              Lwt.choose [
+                Mirage_sleep.ns (Duration.of_hour 1);
+                (update serve () >>= fun () ->
+                 Mirage_sleep.ns (Duration.of_hour 1))
+              ] >>= fun () ->
               go ()
             in
+            Mirage_sleep.ns (Duration.of_hour 1) >>= fun () ->
             go ());
         download_archives (K.parallel_downloads ()) disk http_ctx urls >>= fun () ->
         (th >|= fun _v -> ())
