@@ -666,7 +666,9 @@ module Make
               and size = String.length data in
               let hdr = Tar.Header.make ~file_mode ~mod_time ~user_id ~group_id
                   (Mirage_kv.Key.to_string path) (Int64.of_int size) in
-              urls := Git.find_urls !urls path data;
+              (* If --skip-download we can skip gathering URLs *)
+              if not (K.skip_download ()) then
+                urls := Git.find_urls !urls path data;
               Some (Some Tar.Header.Ustar, hdr, once data)
             | Error _ -> None
           end
