@@ -1032,7 +1032,7 @@ module Make
     let unmarshal s =
       let version = int_of_char s.[0] in
       match version with
-      | 2 -> Ok (Marshal.from_string s 1)
+      | 2 -> Ok (Marshal.from_string s 2)
       | _ -> Error ("Unsupported version " ^ string_of_int version)
 
     let dump_index index_dump t =
