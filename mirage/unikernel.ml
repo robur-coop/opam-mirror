@@ -800,6 +800,7 @@ module Make
       Lwt_mutex.with_lock update_lock (fun () ->
           Logs.info (fun m -> m "pulling the git repository");
           last_git := Mirage_ptime.now ();
+          last_git_status := Error "pending...";
           Git_kv.pull git_kv >>= function
           | Error `Msg msg ->
             Logs.err (fun m -> m "error while updating git: %s" msg);
