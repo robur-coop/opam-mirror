@@ -783,7 +783,7 @@ module Make
     let update_lock = Lwt_mutex.create ()
 
     let update_serve ~remote t git_kv changes =
-      last_git_status := Ok (List.length changes);
+      last_git_status := Ok (Some (List.length changes));
       let commit_id = commit_id git_kv in
       modified git_kv >>= fun modified ->
       Logs.info (fun m -> m "git: %s" commit_id);
@@ -800,7 +800,7 @@ module Make
       Lwt_mutex.with_lock update_lock (fun () ->
           Logs.info (fun m -> m "pulling the git repository");
           last_git := Mirage_ptime.now ();
-          last_git_status := Error "pending...";
+          last_git_status := Ok None;
           Git_kv.pull git_kv >>= function
           | Error `Msg msg ->
             Logs.err (fun m -> m "error while updating git: %s" msg);
@@ -808,7 +808,7 @@ module Make
             Lwt.return None
           | Ok [] ->
             Logs.info (fun m -> m "git changes are empty");
-            last_git_status := Ok 0;
+            last_git_status := Ok (Some 0);
             Lwt.return (Some ([], SM.empty))
           | Ok changes -> update_serve ~remote t git_kv changes)
 
@@ -824,7 +824,10 @@ module Make
           !archives
           !remaining_downloads
           (ptime_to_http_date !last_git)
-          (match !last_git_status with Ok x -> "ok with " ^ string_of_int x ^ " changes" | Error msg -> "error " ^ msg)
+          (match !last_git_status with
+           | Ok Some x -> "ok with " ^ string_of_int x ^ " changes"
+           | Ok None -> "pending..."
+           | Error msg -> "error " ^ msg)
       in
       let sort_by_ts a b = Ptime.compare b a in
       let active_downloads =
@@ -1160,7 +1163,7 @@ module Make
            | Error () ->
              Git_kv.connect git_ctx remote >>= fun git ->
              last_git := Mirage_ptime.now ();
-             last_git_status := Ok 0; (* TODO should be the number of files *)
+             last_git_status := Ok (Some 0); (* TODO should be the number of files *)
              Lwt.return (true, git))
           >>= fun (need_dump, git) ->
           let commit_id = Serve.commit_id git in
