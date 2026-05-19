@@ -297,6 +297,8 @@ module Make
 
   let last_git_status = ref (Error "unknown")
 
+  let next_update = ref Ptime.epoch
+
   module Disk = struct
     module KS = Set.Make(Mirage_kv.Key)
 
@@ -817,7 +819,7 @@ module Make
          - archive size (can we easily measure?) and number of "good" elements
       *)
       let archive_stats =
-        Fmt.str "<ul><li>commit %s</li><li>last modified (of index.tar.gz) %s</li><li>repo %s</li><li>%u validated archives on disk</li><li>%Lu bytes free</li><li>%u URLs identified</li><li>%u downloads are remaining</li><li>last git fetch %s</li><li>last git status: %s</li></ul>"
+        Fmt.str "<ul><li>commit %s</li><li>last modified (of index.tar.gz) %s</li><li>repo %s</li><li>%u validated archives on disk</li><li>%Lu bytes free</li><li>%u URLs identified</li><li>%u downloads are remaining</li><li>last git fetch %s</li><li>last git status: %s</li><li>next update: %s</li></ul>"
           t.commit_id t.modified (K.remote ())
           (SM.cardinal disk.Disk.md5s)
           (KV.free disk.Disk.dev)
@@ -828,6 +830,7 @@ module Make
            | Ok Some x -> "ok with " ^ string_of_int x ^ " changes"
            | Ok None -> "pending..."
            | Error msg -> "error " ^ msg)
+          (ptime_to_http_date !next_update)
       in
       let sort_by_ts a b = Ptime.compare b a in
       let active_downloads =
@@ -1238,10 +1241,16 @@ module Make
              Lwt.return_unit) ;
           (Disk.check ~skip_verify_sha256:(K.skip_verify_sha256 ()) disk)
         ] >>= fun () ->
+        let in_one_hour now =
+          Option.value ~default:Ptime.epoch
+            (Ptime.of_span (Ptime.Span.add (Ptime.to_span (Mirage_ptime.now ()))
+                              (Ptime.Span.of_int_s (60 * 60))))
+        in
         Lwt.async (fun () ->
             let rec go () =
               Lwt.choose [
-                Mirage_sleep.ns (Duration.of_hour 1);
+                (next_update := in_one_hour (Mirage_ptime.now ());
+                 Mirage_sleep.ns (Duration.of_hour 1));
                 (update serve () >>= fun () ->
                  Mirage_sleep.ns (Duration.of_hour 1))
               ] >>= fun () ->
