@@ -5,7 +5,7 @@ let hash_to_string = Archive_checksum.Hash.to_string
 let hex_of_string s =
   match Ohex.decode s with
   | d -> Ok d
-  | exception Invalid_argument err -> Error (`Msg err)
+  | exception Invalid_argument err -> Error (`Msg (err ^ " in hex-encoded " ^ s))
 
 let decode_digest filename str =
   let hex h s =
@@ -128,20 +128,23 @@ let extract_urls filename str =
      extra-source NAME { src: URL checksum: [ STRING ] } (OR checksum: STRING) <- multiple occurences possible
   *)
   let open OpamParserTypes.FullPos in
-  let opamfile = OpamParser.FullPos.string str filename in
-  let unavailable =
-    List.exists
-      (function
-        | { pelem = Variable ({ pelem = "available" ; _ },
-                              { pelem = (Bool false | List { pelem = [{ pelem = Bool false; _ }] ; _ }); _ })
-          ; _ } -> true
-        | _ -> false)
-      opamfile.file_contents
-  in
-  if unavailable then
-     [], []
-  else
-    extract_checksums_and_urls filename opamfile
+  match OpamParser.FullPos.string str filename with
+  | exception e ->
+    [], [ `Msg ("error reading filename " ^ Printexc.to_string e) ]
+  | opamfile ->
+    let unavailable =
+      List.exists
+        (function
+          | { pelem = Variable ({ pelem = "available" ; _ },
+                                { pelem = (Bool false | List { pelem = [{ pelem = Bool false; _ }] ; _ }); _ })
+            ; _ } -> true
+          | _ -> false)
+        opamfile.file_contents
+    in
+    if unavailable then
+      [], []
+    else
+      extract_checksums_and_urls filename opamfile
 
 type repo = {
   upstream : string;
