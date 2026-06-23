@@ -5,7 +5,7 @@ let hash_to_string = Archive_checksum.Hash.to_string
 let hex_of_string s =
   match Ohex.decode s with
   | d -> Ok d
-  | exception Invalid_argument err -> Error (`Msg err)
+  | exception Invalid_argument err -> Error (`Msg (err ^ " in hex-encoded " ^ s))
 
 let decode_digest filename str =
   let hex h s =
