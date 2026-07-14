@@ -22,9 +22,11 @@ let mirror =
     ]
     (block @-> stackv4v6 @-> git_client @-> alpn_client @-> job)
 
-let stack = generic_stackv4v6 default_network
+let dhcp_requests = make_dhcp_requests ()
+let stack, lease = generic_stackv4v6_with_lease default_network ~dhcp_requests
+let dhcp = dhcp_requests, lease
 let he = generic_happy_eyeballs stack
-let dns = generic_dns_client stack he
+let dns = generic_dns_client stack he ~dhcp
 let tcp = tcpv4v6_of_stackv4v6 stack
 let block = block_of_file "tar"
 
