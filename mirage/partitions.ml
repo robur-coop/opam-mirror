@@ -133,7 +133,7 @@ module Make(BLOCK : Mirage_block.S) = struct
          (* protective MBR + GPT header + GPT table *)
          let ( + ) = Int64.add in
          empty.first_usable_lba +
-         min 1L (Int64.of_int (2 * Tar.Header.length / sector_size)) + sectors_cache + sectors_cache + sectors_git + sectors_index
+         min 1L (Int64.of_int (2 * Tar.Header.length / sector_size)) + sectors_cache + sectors_cache + sectors_git + sectors_index + sectors_swap
          + 1L (* backup GPT header *) then
         Lwt.return_error (`Msg "too small disk")
       else Lwt_result.return ()
