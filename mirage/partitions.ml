@@ -133,7 +133,7 @@ module Make(BLOCK : Mirage_block.S) = struct
          (* protective MBR + GPT header + GPT table *)
          let ( + ) = Int64.add in
          empty.first_usable_lba +
-         min 1L (Int64.of_int (2 * Tar.Header.length / sector_size)) + sectors_cache + sectors_cache + sectors_git + sectors_index
+         min 1L (Int64.of_int (2 * Tar.Header.length / sector_size)) + sectors_cache + sectors_cache + sectors_git + sectors_index + sectors_swap
          + 1L (* backup GPT header *) then
         Lwt.return_error (`Msg "too small disk")
       else Lwt_result.return ()
@@ -195,12 +195,13 @@ module Make(BLOCK : Mirage_block.S) = struct
         (Int64.pred swap.starting_lba)
       |> Result.get_ok
     in
-    let gpt =
+    let*? gpt =
       let partitions =
         [ tar; swap; index; git_dump; md5s; sha512s ]
       in
-      Gpt.make ~sector_size ~disk_sectors:size_sectors partitions
-      |> Result.get_ok
+      match Gpt.make ~sector_size ~disk_sectors:size_sectors partitions with
+      | Ok gpt -> Lwt_result.return gpt
+      | Error msg -> Lwt_result.fail (`Msg ("Invalid GUID Partition Table: "^msg))
     in
     let buf =
       Cstruct.create (sector_size * (Int64.to_int gpt.first_usable_lba + 2 * Tar.Header.length))
